@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { addSpend, BUY_URL, creditStatus, CreditRefreshGuard, CreditStatus, SpendRecord } from '../core/credits';
+import { EconomyRouting, pickEconomyModel, sameModel, worthDelegating } from '../core/economy';
 import { DEFAULT_BASE_URL, GatewayClient, GatewayError, LiveLimit, normalizeBaseUrl } from '../core/gateway';
 import { defaultKeyLabel, KeyState, keyStates, maskKey, StoredKey } from '../core/keyring';
 import { addMemory, readMemory } from '../core/memory';
@@ -18,6 +19,10 @@ const SPEND_STATE = 'openrouter.spend';
 const BYPASS_ACK_STATE = 'openrouter.bypassAcknowledged';
 /** Remembers the picker's sort between sessions. */
 const MODEL_SORT_STATE = 'openrouter.modelSort';
+/** Whether economy mode is on, remembered between sessions. */
+const ECONOMY_STATE = 'openrouter.economy';
+/** Output cap for delegated work: summaries and sub-agent reports are short by design. */
+const ECONOMY_MAX_TOKENS = 8_000;
 /** The gateway may settle usage after the request has finished. */
 const CREDIT_REFRESH_DELAYS_MS = [5_000, 15_000, 30_000, 60_000];
 
@@ -107,6 +112,41 @@ export class Services implements vscode.Disposable {
 
 	get credits(): CreditStatus {
 		return creditStatus(this.context.globalState.get<SpendRecord>(SPEND_STATE), this.config.get<number>('monthlySpendLimit', 0), this.liveLimit, new Date(), this.activeKeyId);
+	}
+
+	/** Whether cheap-model delegation is on. Off by default, so cost behaviour never changes silently. */
+	get economy(): boolean {
+		return this.context.globalState.get<boolean>(ECONOMY_STATE) ?? this.config.get<boolean>('economy', false);
+	}
+
+	async setEconomy(on: boolean): Promise<void> {
+		await this.context.globalState.update(ECONOMY_STATE, on);
+		this.fire();
+	}
+
+	/**
+	 * The cheap model that handles summaries, follow-ups and read-only sub-agents,
+	 * or undefined when economy mode is off or nothing cheaper than the current
+	 * model is available. A model the user configured by hand wins over the search.
+	 */
+	async economyRouting(mainModel = this.model): Promise<EconomyRouting | undefined> {
+		if (!this.economy) { return undefined; }
+		const models = await this.models().catch(() => []);
+		const configured = this.config.get<string>('economyModel', '').trim();
+		const main = models.find(m => m.id === mainModel);
+		const cheap = configured
+			? models.find(m => m.id === configured)
+			: pickEconomyModel(models);
+		// Delegating to the model already in use would only add requests.
+		if (!cheap || sameModel(cheap.id, mainModel)) { return undefined; }
+		// A configured model is the user's explicit choice, so it is not price-checked.
+		if (!configured && !worthDelegating(main, cheap)) { return undefined; }
+		return {
+			model: cheap.id,
+			contextWindow: cheap.contextWindow,
+			maxTokens: Math.min(ECONOMY_MAX_TOKENS, cheap.maxOutputTokens || ECONOMY_MAX_TOKENS),
+			subagents: this.config.get<boolean>('economySubagents', true),
+		};
 	}
 
 	/** Fingerprint of the active connection, so local spend is not mixed across keys. */

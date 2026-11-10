@@ -27,6 +27,9 @@ select:hover { border-color: var(--vscode-focusBorder); }
 button.chip.model-chip { display: inline-flex; align-items: center; gap: 5px; padding: 3px 9px; border-radius: 999px; font-size: 0.85em; color: var(--vscode-foreground); background: var(--vscode-editor-background); border: 1px solid var(--vscode-dropdown-border, var(--vscode-panel-border)); }
 button.chip.model-chip:hover { border-color: var(--vscode-focusBorder); }
 .model-symbol { color: var(--vscode-textLink-foreground); }
+/* Quiet until economy mode is on, then it reads as an active toggle carrying the saving. */
+button.chip.economy-chip { color: var(--vscode-descriptionForeground); }
+button.chip.economy-chip[aria-pressed="true"] { color: var(--vscode-charts-green, var(--vscode-testing-iconPassed)); border-color: currentColor; }
 #modelName { max-width: 240px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-weight: 600; }
 .chev { color: var(--vscode-descriptionForeground); font-size: 0.9em; }
 button.icon.send { width: 28px; height: 28px; padding: 0; border-radius: 50%; font-size: 0.9em; display: inline-flex; align-items: center; justify-content: center; }

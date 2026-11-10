@@ -6,6 +6,7 @@ import { checkpointPath, Checkpoints } from '../core/checkpoints';
 import { SUMMARY_PREFIX, estimateTokens, outputTokenLimit } from '../core/context';
 import { AgentEvent, compact, PermissionAnswer, PermissionRequest, runAgent } from '../core/agent';
 import { BUY_URL } from '../core/credits';
+import { addSaving, formatSavings, NO_SAVINGS, savingAgainst, SavingsTally } from '../core/economy';
 import { sessionToMarkdown } from '../core/exportChat';
 import { GatewayClient, GatewayError } from '../core/gateway';
 import { addMemory, readMemory, removeMemory } from '../core/memory';
@@ -13,7 +14,7 @@ import { isPermissionMode, PERMISSION_MODES } from '../core/permissions';
 import { buildSystemPrompt, loadProjectInstructions } from '../core/prompt';
 import { newSession, Session, SessionStore } from '../core/sessions';
 import { findTool } from '../core/tools';
-import { ChatMessage, ContentPart } from '../core/types';
+import { ChatMessage, ContentPart, ModelInfo, Usage } from '../core/types';
 import { Services } from './services';
 
 const DIFF_SCHEME = 'openrouter-diff';
@@ -31,6 +32,7 @@ const HELP = [
 	'- `/mode <default|acceptEdits|plan|bypassPermissions>` switch permission mode',
 	'- `/credits` show spend and credits',
 	'- `/cost` break down what this chat has cost, per model',
+	'- `/economy [on|off]` run summaries, suggestions and read-only sub-agents on a cheap model',
 	'- `/remember <note>` save a fact for future chats',
 	'- `/forget <text>` remove saved notes containing the text',
 	'- `/memory` open saved memory',
@@ -71,6 +73,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Text
 	private routedModels: string[] = [];
 	/** Per-model usage accumulated for this chat, used by /cost. */
 	private spend = new Map<string, { requests: number; cost: number; promptTokens: number; completionTokens: number; cachedTokens: number; reasoningTokens: number }>();
+	/** What economy mode has saved in this chat, against the list price of the chosen model. */
+	private savings: SavingsTally = NO_SAVINGS;
+	/** The model the savings estimate compares against, captured when the turn starts. */
+	private savingsBaseline: ModelInfo | undefined;
 	private restored = false;
 	/** Files snapshotted before the current turn's edits, for one-click rewind. */
 	private checkpoints: Checkpoints | undefined;
@@ -117,6 +123,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Text
 		this.session = newSession();
 		this.remembered = new Set();
 		this.spend = new Map();
+		this.savings = NO_SAVINGS;
 		this.lastSent = undefined;
 		this.lastPromptTokens = 0;
 		this.routedModels = [];
@@ -226,6 +233,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Text
 			case 'setEffort':
 				await this.services.config.update('reasoningEffort', message.value ?? '', vscode.ConfigurationTarget.Global);
 				break;
+			case 'setEconomy':
+				await this.services.setEconomy(message.value !== 'false');
+				await this.reportEconomy();
+				break;
 			case 'permission':
 				this.answerPermission(message.id ?? '', message.answer ?? 'deny');
 				break;
@@ -322,6 +333,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Text
 			this.session = session;
 			this.routedModels = [];
 			this.remembered = new Set();
+			// The tally belongs to the chat that earned it, not to whatever is opened next.
+			this.spend = new Map();
+			this.savings = NO_SAVINGS;
 			this.lastPromptTokens = estimateTokens(session.messages);
 			await this.postTranscript();
 			await this.postState();
@@ -362,6 +376,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Text
 			busy: this.abort !== undefined,
 			queue: this.queue.map((q, i) => ({ index: i, text: q.text || q.attachments[0]?.name || 'Attachment' })),
 			credits: this.services.credits,
+			economy: this.services.economy,
+			savings: formatSavings(this.savings),
 			promptTokens: this.lastPromptTokens,
 			selection: selection ? { file: selection.file, lines: selection.lines } : undefined,
 		});
@@ -462,6 +478,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Text
 		}
 		const info = await services.modelInfo(model);
 		const effort = services.config.get<string>('reasoningEffort', '');
+		const economy = await services.economyRouting(model);
+		this.savingsBaseline = info;
 		this.checkpointRoot = root;
 		this.checkpoints = new Checkpoints(readFileOrUndefined, (r, rel) => path.join(r, rel), root);
 		try {
@@ -480,6 +498,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Text
 				contextWindow: info?.contextWindow,
 				supportsTools: info?.supportsTools,
 				spawnDepth: services.config.get<boolean>('subagents', true) ? 2 : 0,
+				economy,
 				getMode: () => services.mode,
 				requestPermission: request => this.requestPermission(request, abort.signal),
 				beforeToolRun: async (tool, args) => { await this.checkpoints?.capture(tool, args); },
@@ -517,7 +536,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Text
 		}
 	}
 
-	/** Generates a few one-click follow-up prompts from the last exchange, shown as chips. */
+	/**
+	 * Generates a few one-click follow-up prompts from the last exchange, shown as chips.
+	 * This is an extra request after every reply, so economy mode runs it on the cheap model.
+	 */
 	private async suggestFollowups(client: GatewayClient, model: string): Promise<void> {
 		if (!this.services.config.get<boolean>('followupSuggestions', true)) { return; }
 		const lastUser = [...this.session.messages].reverse().find(m => m.role === 'user');
@@ -535,9 +557,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Text
 			`Assistant replied: ${assistantText}`,
 		].join('\n');
 		try {
+			const economy = await this.services.economyRouting(model);
+			this.savingsBaseline ??= await this.services.modelInfo(model);
 			let text = '';
-			for await (const event of client.streamChat({ model, messages: [{ role: 'user', content: prompt }], maxTokens: 120 })) {
+			for await (const event of client.streamChat({ model: economy?.model ?? model, messages: [{ role: 'user', content: prompt }], maxTokens: 120 })) {
 				if (event.type === 'text') { text += event.text; }
+				else if (event.type === 'usage' && economy) { this.recordEconomyUsage(event.usage); void this.postState(); }
 			}
 			const suggestions = text.split('\n').map(l => l.replace(/^[-*•\d.)\s]+/, '').trim()).filter(l => l.length > 2 && l.length < 80).slice(0, 3);
 			if (suggestions.length) { this.post({ type: 'suggestions', suggestions }); }
@@ -568,19 +593,59 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Text
 			this.archive(event.removed);
 			return;
 		}
+		if (event.type === 'economyUsage') {
+			this.recordEconomyUsage(event.usage);
+			// Reported as ordinary usage too, so /cost still shows every request this chat paid for.
+			this.recordUsage(event.usage);
+			this.post({ type: 'event', event: { type: 'usage', usage: event.usage } });
+			void this.postState();
+			return;
+		}
 		if (event.type === 'usage') {
 			this.lastPromptTokens = event.usage.promptTokens;
-			const key = event.usage.model ?? 'unknown';
-			const entry = this.spend.get(key) ?? { requests: 0, cost: 0, promptTokens: 0, completionTokens: 0, cachedTokens: 0, reasoningTokens: 0 };
-			entry.requests++;
-			entry.cost += event.usage.cost ?? 0;
-			entry.promptTokens += event.usage.promptTokens;
-			entry.completionTokens += event.usage.completionTokens;
-			entry.cachedTokens += event.usage.cachedTokens ?? 0;
-			entry.reasoningTokens += event.usage.reasoningTokens ?? 0;
-			this.spend.set(key, entry);
+			this.recordUsage(event.usage);
 		}
 		this.post({ type: 'event', event });
+	}
+
+	private recordUsage(usage: Usage): void {
+		const key = usage.model ?? 'unknown';
+		const entry = this.spend.get(key) ?? { requests: 0, cost: 0, promptTokens: 0, completionTokens: 0, cachedTokens: 0, reasoningTokens: 0 };
+		entry.requests++;
+		entry.cost += usage.cost ?? 0;
+		entry.promptTokens += usage.promptTokens;
+		entry.completionTokens += usage.completionTokens;
+		entry.cachedTokens += usage.cachedTokens ?? 0;
+		entry.reasoningTokens += usage.reasoningTokens ?? 0;
+		this.spend.set(key, entry);
+	}
+
+	/** Tallies what a request on the cheap model saved against the chosen model's list price. */
+	private recordEconomyUsage(usage: Usage): void {
+		this.savings = addSaving(this.savings, savingAgainst(usage, this.savingsBaseline));
+	}
+
+	/** Explains what economy mode will and will not do, so the toggle is not a mystery switch. */
+	private async reportEconomy(): Promise<void> {
+		await this.postState();
+		if (!this.services.economy) {
+			this.post({ type: 'event', event: { type: 'notice', message: 'Economy mode is off. Every request uses the model you picked.' } });
+			return;
+		}
+		const routing = await this.services.economyRouting();
+		if (!routing) {
+			this.post({ type: 'event', event: { type: 'notice', message: 'Economy mode is on, but no model cheaper than the one you picked was found, so nothing is delegated. Set openrouter.economyModel to choose one yourself.' } });
+			return;
+		}
+		const parts = ['summaries', 'follow-up suggestions'];
+		if (routing.subagents) { parts.push('read-only sub-agents'); }
+		this.post({
+			type: 'event',
+			event: {
+				type: 'notice',
+				message: `Economy mode is on: ${parts.join(', ')} run on ${routing.model}. Your replies and all file edits still use the model you picked.`,
+			},
+		});
 	}
 
 	private costReport(): string {
@@ -595,6 +660,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Text
 			lines.push(`- \`${model}\`: **$${s.cost.toFixed(6)}** (${parts.join(', ')})`);
 		}
 		lines.push('', `**Total: $${total.toFixed(6)}**`);
+		const savings = formatSavings(this.savings);
+		if (savings) { lines.push('', `Economy mode: ${savings.label}. ${savings.detail}`); }
 		return lines.join('\n');
 	}
 
@@ -640,6 +707,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Text
 			case '/cost':
 				this.post({ type: 'event', event: { type: 'info', text: this.costReport() } });
 				return true;
+			case '/economy':
+				if (value === 'on' || value === 'off') { await this.services.setEconomy(value === 'on'); }
+				await this.reportEconomy();
+				return true;
 			case '/remember':
 				if (!value) { return false; }
 				await addMemory(this.services.memoryFile, value);
@@ -670,7 +741,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Text
 		try {
 			const model = this.services.model;
 			const info = await this.services.modelInfo(model);
-			const removed = await compact({ client, model, messages: this.session.messages, signal: abort.signal, maxTokens: outputTokenLimit(model, info?.maxOutputTokens, this.services.config.get<number>('maxOutputTokens')) });
+			this.savingsBaseline = info;
+			const removed = await compact({
+				client,
+				model,
+				messages: this.session.messages,
+				signal: abort.signal,
+				maxTokens: outputTokenLimit(model, info?.maxOutputTokens, this.services.config.get<number>('maxOutputTokens')),
+				economy: await this.services.economyRouting(model),
+				onEvent: event => this.onAgentEvent(event),
+			});
 			if (removed.length === 0) {
 				this.post({ type: 'event', event: { type: 'notice', message: 'There is nothing older to summarize yet.' } });
 				return;
@@ -735,6 +815,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Text
 				<button id="attach" class="icon ghost" type="button" title="Attach files" aria-label="Attach files">📎</button>
 				<button id="dictate" class="icon ghost" type="button" title="Dictate a message" aria-label="Dictate a message" hidden>🎤</button>
 				<button id="model" class="chip model-chip" type="button" aria-label="Choose model" title="Search models"><span class="model-symbol" aria-hidden="true">✦</span><span id="modelName">Choose model</span><span aria-hidden="true" class="chev">▾</span></button>
+				<button id="economy" class="chip model-chip economy-chip" type="button" aria-pressed="false" aria-label="Economy mode"><span aria-hidden="true">🌱</span><span id="savings">Economy</span></button>
 				<span class="spacer"></span>
 				<button id="send" class="icon send" type="button" title="Send" aria-label="Send">➤</button>
 				<button id="stop" class="icon ghost" type="button" title="Stop" aria-label="Stop" hidden>■</button>

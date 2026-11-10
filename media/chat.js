@@ -583,6 +583,20 @@
 		$('model').setAttribute('aria-label', 'Choose model: ' + text);
 	}
 
+	function drawEconomy() {
+		const button = $('economy');
+		const on = !!state.economy;
+		button.setAttribute('aria-pressed', on ? 'true' : 'false');
+		// The saving is only meaningful once something has actually run on the cheap model.
+		const savings = on ? state.savings : undefined;
+		$('savings').textContent = savings ? savings.label : 'Economy';
+		button.title = savings
+			? savings.detail
+			: on
+				? 'Economy mode is on: summaries, follow-up suggestions and read-only sub-agents run on a cheaper model. Click to turn off.'
+				: 'Economy mode: run summaries, follow-up suggestions and read-only sub-agents on a cheaper model. Your replies and file edits stay on the model you picked.';
+	}
+
 	function reportRoutedModel(model) {
 		if (!model || model === 'auto' || model === 'openrouter/auto') { return; }
 		state.routedModels = state.routedModels || [];
@@ -602,6 +616,7 @@
 
 		const models = next.models.length ? next.models : [{ id: next.model, name: next.model, efforts: [] }];
 		drawModel();
+		drawEconomy();
 		$('includeSelection').checked = next.includeSelection !== false;
 		fillToggle($('mode'), next.modes.map(m => ({ value: m.id, label: m.short || m.label, title: m.label + ': ' + m.detail })), next.mode);
 		$('mode').classList.toggle('danger', next.mode === 'bypassPermissions');
@@ -802,6 +817,7 @@
 	$('credits').addEventListener('click', () => { $('advanced').open = true; post('credits'); });
 	$('creditsDetail').addEventListener('click', () => post('credits'));
 	$('model').addEventListener('click', () => post('pickModel'));
+	$('economy').addEventListener('click', () => post('setEconomy', { value: state.economy ? 'false' : 'true' }));
 	$('includeSelection').addEventListener('change', e => post('setIncludeSelection', { value: String(e.target.checked) }));
 	onToggle($('effort'), 'setEffort');
 	onToggle($('mode'), 'setMode');

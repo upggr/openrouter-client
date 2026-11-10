@@ -86,6 +86,7 @@ async function handle(
 			reasoningEffort: effort && info?.reasoningEfforts.includes(effort) ? effort : undefined,
 			contextWindow: info?.contextWindow,
 			supportsTools: info?.supportsTools,
+			economy: await services.economyRouting(model),
 			getMode: () => mode,
 			requestPermission: askInModal,
 			onEvent: event => render(event, stream, root),

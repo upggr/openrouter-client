@@ -13,7 +13,7 @@ const BODY = `
 <select id="sessions"></select><button id="newChat"></button><div id="transcript"></div>
 <label id="selectionChip" class="chip" hidden><input id="includeSelection" type="checkbox" checked><span id="selectionText"></span></label>
 <div id="suggestions" hidden></div><div id="status" hidden></div><div id="queue" hidden></div><div id="mentionMenu" hidden></div><div id="attachments" hidden></div><textarea id="input"></textarea><input id="fileInput" type="file" hidden>
-<button id="attach"></button><button id="model"><span id="modelName"></span></button>
+<button id="attach"></button><button id="model"><span id="modelName"></span></button><button id="economy" aria-pressed="false"><span id="savings"></span></button>
 <details id="advanced"><summary><span id="modeBadge" class="chip" hidden></span><span id="effortBadge" class="chip" hidden></span><span id="credits" class="chip"></span></summary>
 <div id="effortWrap" hidden><div id="effort"></div></div><div id="mode"></div>
 <div id="keyPicker"><button id="keyButton" aria-expanded="false"></button><div id="keyMenu" hidden><div id="keyList"></div><button id="addKey"></button><div id="keyForm" hidden><input id="newKey"><input id="newKeyName"><input id="newKeyGateway"><p id="keyError" hidden></p><button id="saveKey"></button><button id="cancelKey"></button></div></div></div>
@@ -120,6 +120,25 @@ test('state fills pickers, per-model effort, credits and context use', () => {
 	// Non-default choices surface as badges on the collapsed Options row.
 	assert.equal($('modeBadge').hidden, false);
 	assert.ok($('modeBadge').className.includes('danger'));
+});
+
+test('the economy toggle reports its state and shows the saving once there is one', () => {
+	const { posted, send, $ } = load();
+	send(STATE);
+	// Off by default, so the chip is a plain invitation rather than a number.
+	assert.equal($('economy').getAttribute('aria-pressed'), 'false');
+	assert.equal($('savings').textContent, 'Economy');
+	$('economy').click();
+	assert.deepEqual(posted.at(-1), { type: 'setEconomy', value: 'true' });
+	send({ ...STATE, economy: true, savings: { label: '~$0.0123 saved', detail: 'Estimated: 2 requests ran on the economy model.' } });
+	assert.equal($('economy').getAttribute('aria-pressed'), 'true');
+	assert.equal($('savings').textContent, '~$0.0123 saved');
+	assert.match($('economy').title, /Estimated/);
+	// Turning it on before anything has run must not imply a saving of zero.
+	send({ ...STATE, economy: true });
+	assert.equal($('savings').textContent, 'Economy');
+	$('economy').click();
+	assert.deepEqual(posted.at(-1), { type: 'setEconomy', value: 'false' });
 });
 
 test('Auto displays routed models as soon as reported and keeps them across state refreshes', () => {

@@ -2,7 +2,7 @@
 	"name": "openrouter-client",
 	"displayName": "OpenRouter Client: AI Chat and Coding Agent (Unofficial)",
 	"description": "Unofficial AI coding agent and chat for VS Code using your OpenRouter API key: sidebar chat, @openrouter in VS Code Chat, hundreds of models, file edits, terminal commands and permission modes.",
-	"version": "0.1.3",
+	"version": "0.1.4",
 	"publisher": "IoannisKokkinis",
 	"author": {
 		"name": "Ioannis Kokkinis",
@@ -319,6 +319,24 @@
 					"default": "",
 					"scope": "application",
 					"description": "Optional model to use while in plan mode, for example a cheaper one. Empty always uses the selected model."
+				},
+				"openrouter.economy": {
+					"type": "boolean",
+					"default": false,
+					"scope": "application",
+					"description": "Start with economy mode on. Economy mode runs conversation summaries, follow-up suggestions and read-only sub-agents on a cheaper model, while your replies and all file edits stay on the model you picked. The toggle next to the model name overrides this."
+				},
+				"openrouter.economyModel": {
+					"type": "string",
+					"default": "",
+					"scope": "application",
+					"description": "Model to use for delegated work in economy mode. Empty picks the cheapest capable model your key can use, and delegates nothing when none is cheaper than the model you picked."
+				},
+				"openrouter.economySubagents": {
+					"type": "boolean",
+					"default": true,
+					"scope": "application",
+					"description": "In economy mode, run sub-agents on the cheap model. They are restricted to read-only tools, because reviewing a weaker model's edits costs back what it saved."
 				}
 			}
 		}

@@ -1,7 +1,8 @@
 import { compactLimit, compactionCut, DEFAULT_OUTPUT_TOKENS, estimateTokens, flattenForSummary, KEEP_TOKENS_AFTER_COMPACT, keepTokensFor, looksLikeOverflow, SUMMARY_PREFIX, trimForRequest } from './context';
+import { EconomyRouting } from './economy';
 import { decide, PermissionMode, rememberKey, ToolKind } from './permissions';
 import { byteSize, COMPACT_REQUEST_BYTES } from './requestSize';
-import { findTool, Tool, TOOLS, ToolContext } from './tools';
+import { findTool, isReadOnlyTool, Tool, TOOLS, ToolContext } from './tools';
 import { ChatMessage, ChatStreamer, ToolCall, Usage } from './types';
 
 export type PermissionAnswer = 'allow' | 'always' | 'deny';
@@ -22,6 +23,8 @@ export type AgentEvent =
 	| { type: 'toolStart'; callId: string; tool: string; summary: string; args: Record<string, unknown> }
 	| { type: 'toolEnd'; callId: string; ok: boolean; output: string }
 	| { type: 'usage'; usage: Usage }
+	/** Usage from a request that ran on the economy model, so savings can be tallied separately. */
+	| { type: 'economyUsage'; usage: Usage }
 	| { type: 'notice'; message: string }
 	| { type: 'compacted'; removed: ChatMessage[] };
 
@@ -51,6 +54,10 @@ export interface AgentOptions {
 	remembered?: Set<string>;
 	/** Upper bound for how deep sub-agents may spawn their own sub-agents (0 disables spawning). */
 	spawnDepth?: number;
+	/** Set when a cheap model should handle summaries and read-only sub-agents. */
+	economy?: EconomyRouting;
+	/** Restricts this run to tools that cannot change anything. Used for economy sub-agents. */
+	readOnlyTools?: boolean;
 	signal?: AbortSignal;
 }
 
@@ -78,25 +85,40 @@ const MIN_TURNS_BETWEEN_COMPACTIONS = 3;
 const MAX_EMPTY_RETRIES = 2;
 const CONTINUE_PROMPT = 'Continue with the task. Use a tool or give your response now.';
 
-/** Models where marking the latest message for caching has been verified to work. */
-const CONVERSATION_CACHE_MODELS = /claude/i;
+/**
+ * Models that need an explicit cache breakpoint on the latest message for the
+ * conversation so far to be billed at the much lower cache-read rate. OpenAI and
+ * DeepSeek cache automatically and ignore the marker, so they are left out.
+ */
+const CONVERSATION_CACHE_MODELS = /claude|gemini/i;
 
-export function toolSchemas(spawnDepth = 0) {
-	return spawnDepth > 0 ? [...TOOLS.map(t => t.schema), SPAWN_SCHEMA] : TOOLS.map(t => t.schema);
+export function toolSchemas(spawnDepth = 0, readOnly = false) {
+	const tools = readOnly ? TOOLS.filter(t => isReadOnlyTool(t.schema.function.name)) : TOOLS;
+	// A read-only sub-agent cannot delegate further, or the restriction would be easy to escape.
+	return spawnDepth > 0 && !readOnly ? [...tools.map(t => t.schema), SPAWN_SCHEMA] : tools.map(t => t.schema);
 }
 
 /**
  * Replaces older messages with a model-written summary and keeps recent work
  * intact. Returns the messages it removed, or an empty list if nothing was old enough.
  */
-export async function compact(options: Pick<AgentOptions, 'client' | 'model' | 'messages' | 'signal' | 'maxTokens'>, keepTokens = KEEP_TOKENS_AFTER_COMPACT): Promise<ChatMessage[]> {
+export async function compact(
+	options: Pick<AgentOptions, 'client' | 'model' | 'messages' | 'signal' | 'maxTokens' | 'economy'> & Partial<Pick<AgentOptions, 'onEvent'>>,
+	keepTokens = KEEP_TOKENS_AFTER_COMPACT,
+): Promise<ChatMessage[]> {
 	const { messages } = options;
 	const cut = compactionCut(messages, keepTokens);
 	if (cut === 0) { return []; }
 	let summary = '';
+	// Summarizing sends the whole conversation, which makes it the most expensive
+	// request in a long chat, and it is plain summarizing work a cheap model can do.
+	const economy = options.economy;
+	const model = economy?.model ?? options.model;
+	const maxTokens = economy ? economy.maxTokens : options.maxTokens;
 	const request: ChatMessage[] = [{ role: 'user', content: `${COMPACT_PROMPT}\n\n<conversation>\n${flattenForSummary(messages.slice(0, cut))}\n</conversation>` }];
-	for await (const event of options.client.streamChat({ model: options.model, messages: request, maxTokens: options.maxTokens }, options.signal)) {
+	for await (const event of options.client.streamChat({ model, messages: request, maxTokens }, options.signal)) {
 		if (event.type === 'text') { summary += event.text; }
+		else if (event.type === 'usage' && economy) { options.onEvent?.({ type: 'economyUsage', usage: event.usage }); }
 	}
 	if (!summary.trim()) { throw new Error('The model returned an empty summary.'); }
 	return messages.splice(0, cut, { role: 'user', content: `${SUMMARY_PREFIX}\n\n${summary}` });
@@ -117,7 +139,7 @@ export function withCacheMarkers(system: string, messages: ChatMessage[], model:
 export async function runAgent(options: AgentOptions): Promise<void> {
 	const { client, messages, signal, onEvent } = options;
 	const remembered = options.remembered ?? new Set<string>();
-	const tools = options.supportsTools === false ? undefined : toolSchemas(options.spawnDepth ?? 0);
+	const tools = options.supportsTools === false ? undefined : toolSchemas(options.spawnDepth ?? 0, options.readOnlyTools === true);
 	const overhead = Math.ceil((options.systemPrompt.length + JSON.stringify(tools ?? []).length) / 4);
 	let contextWindow = options.contextWindow;
 	let calibration = 1;
@@ -253,6 +275,10 @@ async function executeCall(call: ToolCall, options: AgentOptions, remembered: Se
 	if (!tool) {
 		return report(onEvent, call.id, name, args, name, false, `Unknown tool: ${name}`);
 	}
+	// A read-only run declares only read tools, but a model can still ask for one that was not offered.
+	if (options.readOnlyTools && !isReadOnlyTool(name)) {
+		return report(onEvent, call.id, name, args, tool.summary(args), false, `${name} is not available here. Report what needs changing instead of changing it.`);
+	}
 	const summary = tool.summary(args);
 	const mode = options.getMode();
 	const context: ToolContext = {
@@ -306,9 +332,14 @@ async function runSubagent(callId: string, args: Record<string, unknown>, option
 		return report(onEvent, callId, SPAWN_TOOL, args, `Sub-agent: ${label}`, false, 'Sub-agent spawning is disabled or the nesting limit was reached.');
 	}
 	onEvent({ type: 'toolStart', callId, tool: SPAWN_TOOL, summary: `Sub-agent: ${label}`, args });
+	// Economy sub-agents run on the cheap model. They are kept read-only because a
+	// weaker model's edits would have to be reviewed, which costs back what it saved.
+	const economy = options.economy?.subagents ? options.economy : undefined;
 	const systemPrompt = [
 		'You are a focused sub-agent helping with one subtask inside a larger coding session.',
-		'Complete the task below using the available tools, then reply with a concise result: what you found or did, and any file paths involved.',
+		economy
+			? 'Complete the task below using the available read-only tools, then reply with a concise result: what you found, and the exact file paths and line numbers involved. You cannot edit files or run commands, so report what should change instead of changing it.'
+			: 'Complete the task below using the available tools, then reply with a concise result: what you found or did, and any file paths involved.',
 		'Do not ask questions; make reasonable assumptions and finish.',
 		'',
 		`Subtask: ${task}`,
@@ -322,9 +353,22 @@ async function runSubagent(callId: string, args: Record<string, unknown>, option
 			messages,
 			maxTurns: SUBAGENT_MAX_TURNS,
 			spawnDepth: (options.spawnDepth ?? 1) - 1,
+			...(economy ? {
+				model: economy.model,
+				contextWindow: economy.contextWindow,
+				maxTokens: economy.maxTokens,
+				modelMaxOutput: economy.maxTokens,
+				readOnlyTools: true,
+				// A cheap model's own reasoning effort is not worth paying for here.
+				reasoningEffort: undefined,
+				supportsTools: true,
+			} : {}),
 			onEvent: event => {
 				if (event.type === 'routedModel') { onEvent(event); }
 				if (event.type === 'text') { result += event.text; }
+				// Usage from the cheap model is tallied as a saving, not as main-model spend.
+				if (event.type === 'usage') { onEvent(economy ? { type: 'economyUsage', usage: event.usage } : event); }
+				if (event.type === 'economyUsage') { onEvent(event); }
 				// Re-emit sub-agent progress so the UI can group it, tagged with the parent call.
 				if (event.type === 'toolStart' || event.type === 'toolEnd') { onEvent({ ...event, callId: `${callId}:${event.callId}` }); }
 			},

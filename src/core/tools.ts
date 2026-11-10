@@ -384,6 +384,13 @@ const forget: Tool = {
 
 export const TOOLS: Tool[] = [readFile, listFiles, searchText, writeFile, editFile, runCommand, remember, forget];
 
+/** Tools that only look at the workspace, so they can be given to a restricted run. */
+const READ_ONLY_TOOLS = new Set([readFile, listFiles, searchText].map(t => t.schema.function.name));
+
+export function isReadOnlyTool(name: string): boolean {
+	return READ_ONLY_TOOLS.has(name);
+}
+
 export function findTool(name: string): Tool | undefined {
 	return TOOLS.find(t => t.schema.function.name === name);
 }

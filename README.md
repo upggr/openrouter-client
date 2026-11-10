@@ -26,6 +26,7 @@ It works in its own sidebar, as **`@openrouter` in the VS Code Chat window**, an
 - **Real spend, not an estimate.** OpenRouter reports your balance to your API key, so the credit figure is authoritative. A key with its own spending cap shows that cap.
 - **`openrouter/auto` routing** that picks a model for each request, with automatic failover when a provider rejects it.
 - **Sub-agents** for focused subtasks, each with its own context.
+- **Economy mode** moves summaries, follow-up suggestions and read-only sub-agents onto a cheaper model, and shows what it saved.
 - **Checkpoints and rewind:** undo a turn's file changes in one click.
 - **@-mentions** of workspace files, and follow-up suggestions after each turn.
 - **Four permission modes:** Ask first, Accept edits, Plan only and Bypass permissions.
@@ -63,6 +64,22 @@ Each row shows the price per million tokens for input and output, the context wi
 - **priced per output** means an image or audio model that bills per image or per second rather than per token.
 - Tool support is required for the agent to edit files. Models without it are still fine for chat.
 
+## Economy mode
+
+A long agent session spends credits on work that does not need your strongest model. The **Economy** toggle next to the model name moves that work to a cheap one:
+
+- **conversation summaries**, which send the whole chat and are the most expensive request in a long session,
+- **follow-up suggestions**, an extra request after every single reply,
+- **sub-agents**, restricted to read-only tools so they research and report instead of editing.
+
+**Your replies and every file edit stay on the model you picked.** Weaker models are unreliable at tool calling, and reviewing their edits costs back what delegating saved, so economy mode never hands them a file to change.
+
+The chip shows roughly what has been saved in this chat. It is an estimate: it compares the tokens that really ran on the cheap model with the list price of the model you picked for the same tokens. When your model publishes no price, such as `openrouter/auto`, no saving can be worked out and none is claimed.
+
+Economy mode delegates nothing when no model cheaper than your current one is available, so switching to a free model does not start pointless extra requests. Set `openrouter.economyModel` to choose the cheap model yourself, or turn off `openrouter.economySubagents` to keep sub-agents on your main model. `/economy on|off` works in the chat.
+
+Two other ways to spend less, both on by default: **prompt caching** marks the stable parts of a request so repeated context is billed at the much lower cache-read rate, and long chats are **summarized** rather than resent in full.
+
 ## Credits
 
 The chip in the chat and the status bar show your real OpenRouter balance, read with your own key. If the key carries its own spending limit, that limit is shown instead of the account balance, because it is the one that will stop your requests. Set `openrouter.monthlySpendLimit` to track a budget of your own as well.
@@ -78,6 +95,9 @@ See the settings under **OpenRouter Client** in VS Code settings, or `openrouter
 | `openrouter.permissionMode` | `ask`, `acceptEdits`, `plan` or `bypass` |
 | `openrouter.maxTurns` | How many tool turns one request may take |
 | `openrouter.subagents` | Allow the agent to spawn sub-agents |
+| `openrouter.economy` | Start with economy mode on |
+| `openrouter.economyModel` | Model for delegated work, empty picks the cheapest capable one |
+| `openrouter.economySubagents` | In economy mode, run sub-agents on the cheap model |
 | `openrouter.monthlySpendLimit` | Your own monthly budget, in USD |
 
 ## Credit where it is due

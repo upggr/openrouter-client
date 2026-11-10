@@ -9,6 +9,7 @@ import { compact, runAgent, withCacheMarkers, AgentEvent, PermissionAnswer } fro
 import { buildAttachedContent, canReadImages, truncateAttachmentText } from '../core/attachments';
 import { compactLimit, compactionCut, DEFAULT_OUTPUT_TOKENS, estimateTokens, keepTokensFor, outputTokenLimit, flattenForSummary, looksLikeOverflow, trimForRequest } from '../core/context';
 import { addSpend, creditStatus, CreditRefreshGuard } from '../core/credits';
+import { addSaving, formatSavings, NO_SAVINGS, pickEconomyModel, sameModel, savingAgainst, worthDelegating } from '../core/economy';
 import { bestScore, blendedPrice, families, filterModels, formatContext, formatPrice, groupModels, isFree, priceVaries, sortModels } from '../core/modelPicker';
 import { Checkpoints } from '../core/checkpoints';
 import { LiveLimit } from '../core/gateway';
@@ -605,6 +606,71 @@ test('spawn_agent is refused when the depth limit is reached', async () => {
 		const spawnEnd = events.find(e => e.type === 'toolEnd' && e.callId === 'm1') as { ok: boolean; output: string } | undefined;
 		assert.ok(spawnEnd && !spawnEnd.ok, 'refused at depth 0');
 		assert.match(spawnEnd?.output ?? '', /disabled|nesting limit/);
+	} finally { clean(); }
+});
+
+test('economy mode runs sub-agents on the cheap model with read-only tools', async () => {
+	const { root, clean } = workspace();
+	try {
+		const events: AgentEvent[] = [];
+		const seen: { model: string; tools: string[] }[] = [];
+		const stream: ChatStreamer = {
+			async *streamChat(request) {
+				seen.push({ model: request.model, tools: (request.tools ?? []).map(t => t.function.name) });
+				const last = request.messages.at(-1);
+				const lastText = last && typeof last.content === 'string' ? last.content : '';
+				if (last?.role === 'user' && lastText.includes('find the usages')) {
+					// A weaker model may still reach for a tool it was never offered.
+					yield call('s1', 'write_file', { path: 'sneaky.txt', content: 'x' });
+					return;
+				}
+				if (last?.role === 'tool' && last.tool_call_id === 's1') {
+					yield { type: 'usage', usage: { promptTokens: 1000, completionTokens: 500, cost: 0.0001, model: 'cheap/model' } };
+					yield say('Found them in a.ts.');
+					return;
+				}
+				if (last?.role === 'user') {
+					yield call('m1', 'spawn_agent', { task: 'find the usages', name: 'find' });
+					return;
+				}
+				yield say('main done');
+			},
+		};
+		const opts = {
+			...agentOptions(stream, root, 'default', 'allow', events),
+			spawnDepth: 1,
+			economy: { model: 'cheap/model', contextWindow: 200_000, maxTokens: 8_000, subagents: true },
+		};
+		await runAgent(opts);
+		// The main conversation stays on the chosen model; only the sub-agent moves.
+		assert.equal(seen[0].model, 'm');
+		assert.equal(seen[1].model, 'cheap/model');
+		// A read-only sub-agent is never offered edit, command or spawn tools.
+		assert.deepEqual(seen[1].tools, ['read_file', 'list_files', 'search_text']);
+		assert.equal(fs.existsSync(path.join(root, 'sneaky.txt')), false, 'an unoffered edit tool is refused, not run');
+		// Cheap-model usage is reported separately so it can be tallied as a saving.
+		assert.ok(events.some(e => e.type === 'economyUsage' && e.usage.model === 'cheap/model'));
+		assert.ok(!events.some(e => e.type === 'usage'), 'sub-agent usage is not counted as main-model spend');
+	} finally { clean(); }
+});
+
+test('without economy, sub-agents keep the main model and its full toolset', async () => {
+	const { root, clean } = workspace();
+	try {
+		const seen: { model: string; tools: string[] }[] = [];
+		const stream: ChatStreamer = {
+			async *streamChat(request) {
+				seen.push({ model: request.model, tools: (request.tools ?? []).map(t => t.function.name) });
+				const last = request.messages.at(-1);
+				const lastText = last && typeof last.content === 'string' ? last.content : '';
+				if (last?.role === 'user' && lastText.includes('do the thing')) { yield say('did it'); return; }
+				if (last?.role === 'user') { yield call('m1', 'spawn_agent', { task: 'do the thing' }); return; }
+				yield say('main done');
+			},
+		};
+		await runAgent({ ...agentOptions(stream, root, 'default', 'allow', []), spawnDepth: 1 });
+		assert.equal(seen[1].model, 'm');
+		assert.ok(seen[1].tools.includes('write_file'), 'edits stay available without economy mode');
 	} finally { clean(); }
 });
 
@@ -1335,6 +1401,66 @@ test('ranked sorts stay in one list while named sorts group by vendor', () => {
 	assert.deepEqual(groupModels(models, 'cheapest').map(g => g.label), ['']);
 	assert.deepEqual(groupModels(models, 'name').map(g => g.label), ['anthropic', 'openai']);
 	assert.deepEqual(families(models).map(f => `${f.id}:${f.count}`), ['anthropic:2', 'openai:1']);
+});
+
+test('the economy model is the cheapest one that can actually do delegated work', () => {
+	const models = [
+		model('a/expensive', { promptPricePerMillion: 15, completionPricePerMillion: 75 }),
+		model('a/tiny-context', { promptPricePerMillion: 0, completionPricePerMillion: 0, contextWindow: 8_000 }),
+		model('a/no-tools', { promptPricePerMillion: 0, completionPricePerMillion: 0, supportsTools: false }),
+		model('a/painter', { promptPricePerMillion: 0, completionPricePerMillion: 0, outputModalities: ['IMAGE'] }),
+		model('a/router'),
+		model('a/cheap', { promptPricePerMillion: 0.05, completionPricePerMillion: 0.1 }),
+		model('a/free', { promptPricePerMillion: 0, completionPricePerMillion: 0 }),
+	];
+	assert.equal(pickEconomyModel(models)?.id, 'a/free');
+	// A free model with no room to read files, no tools, or per-image billing is no use here.
+	assert.equal(pickEconomyModel(models.filter(m => m.id !== 'a/free'))?.id, 'a/cheap');
+	assert.equal(pickEconomyModel([model('a/router')]), undefined, 'an unpriced model cannot be shown to be cheaper');
+});
+
+test('delegating is refused when the cheap model is not clearly cheaper', () => {
+	const cheap = model('a/cheap', { promptPricePerMillion: 0.05, completionPricePerMillion: 0.1 });
+	const free = model('a/free', { promptPricePerMillion: 0, completionPricePerMillion: 0 });
+	const expensive = model('a/expensive', { promptPricePerMillion: 15, completionPricePerMillion: 75 });
+	assert.equal(worthDelegating(expensive, cheap), true);
+	assert.equal(worthDelegating(expensive, free), true);
+	// Nearly the same price only adds requests and failed turns.
+	assert.equal(worthDelegating(model('a/alsocheap', { promptPricePerMillion: 0.05, completionPricePerMillion: 0.1 }), cheap), false);
+	assert.equal(worthDelegating(free, free), false);
+	// Auto routing publishes no price, so a known-cheap model is still the safer bet.
+	assert.equal(worthDelegating(model('openrouter/auto'), cheap), true);
+	assert.equal(worthDelegating(expensive, undefined), false);
+	// Billing variants of one model are the same model, so there is nothing to delegate.
+	assert.equal(sameModel('a/free', 'a/free:free'), true);
+	assert.equal(sameModel('a/free', 'b/free'), false);
+});
+
+test('savings compare real usage with the chosen model, and an unknown price is never guessed', () => {
+	const main = model('a/expensive', { promptPricePerMillion: 10, completionPricePerMillion: 100 });
+	// 1M prompt + 0.1M completion on the main model would be $10 + $10 = $20.
+	const saving = savingAgainst({ promptTokens: 1_000_000, completionTokens: 100_000, cost: 0.5 }, main);
+	assert.equal(saving, 19.5);
+	assert.equal(savingAgainst({ promptTokens: 100, completionTokens: 10, cost: 0.1 }, model('openrouter/auto')), undefined);
+	assert.equal(savingAgainst({ promptTokens: 100, completionTokens: 10, cost: undefined }, main), undefined);
+	// A cheap model that was not actually cheaper must show up as a loss, not be hidden.
+	assert.ok(savingAgainst({ promptTokens: 10, completionTokens: 1, cost: 5 }, main)! < 0);
+});
+
+test('the savings label stays honest about estimates, losses and unpriced requests', () => {
+	assert.equal(formatSavings(NO_SAVINGS), undefined, 'nothing is claimed before anything has run');
+	const saved = formatSavings(addSaving(addSaving(NO_SAVINGS, 0.01), 0.005));
+	assert.equal(saved?.label, '~$0.0150 saved');
+	// Fractions of a cent still need to be readable, so they keep more digits.
+	assert.equal(formatSavings(addSaving(NO_SAVINGS, 0.000004))?.label, '~$0.000004 saved');
+	assert.match(saved?.detail ?? '', /Estimated: 2 requests/);
+	// Every figure is a comparison with a model that never ran, so it is never stated as fact.
+	const unpriced = formatSavings(addSaving(NO_SAVINGS, undefined));
+	assert.equal(unpriced?.label, 'economy on');
+	assert.match(unpriced?.detail ?? '', /no price was published/);
+	const mixed = formatSavings(addSaving(addSaving(NO_SAVINGS, 0.02), undefined));
+	assert.match(mixed?.detail ?? '', /1 could not be priced/);
+	assert.match(formatSavings(addSaving(NO_SAVINGS, -0.5))?.label ?? '', /extra/);
 });
 
 test('prices and context windows read clearly', () => {

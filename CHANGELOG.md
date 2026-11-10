@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.4
+
+- Economy mode: a toggle next to the model name that runs conversation summaries, follow-up suggestions and read-only sub-agents on a cheaper model, while your replies and all file edits stay on the model you picked. The chip shows an estimate of what it saved, and claims nothing when the comparison cannot be priced.
+- Economy sub-agents are restricted to read-only tools, so a weaker model researches and reports instead of making edits that would have to be reviewed.
+- Prompt caching now also marks conversations for Gemini, not only Claude, so repeated context is billed at the lower cache-read rate.
+- Added `/economy [on|off]`, and `openrouter.economy`, `openrouter.economyModel` and `openrouter.economySubagents`.
+
 ## 0.1.3
 
 - Register the chat participant as `@openrouter` again, so VS Code stops rejecting the invalid name and the handle matches the documentation.
