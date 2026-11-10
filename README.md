@@ -14,7 +14,7 @@ OpenRouter Client connects Visual Studio Code to [OpenRouter](https://openrouter
 
 It works in its own sidebar, as **`@openrouter` in the VS Code Chat window**, and as a model provider that adds OpenRouter models to the VS Code Chat model picker.
 
-> **Unofficial.** OpenRouter Client is an independent open source project. It is not affiliated with, endorsed by or supported by OpenRouter.
+> **Unofficial.** OpenRouter Client is an independent open source project. It is not affiliated with, endorsed by or supported by OpenRouter. OpenRouter is a product of OpenRouter, Inc., and the name is used here only to say what this extension connects to.
 
 ## Features
 

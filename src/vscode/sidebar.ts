@@ -695,8 +695,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Text
 <body>
 <section id="welcome" hidden>
 	<h2>Connect OpenRouter Client</h2>
-	<p><strong>Did your provider already give you a gateway and API key?</strong> Enter them here.</p>
-	<label for="gateway">Gateway URL</label>
+	<p>Paste an OpenRouter API key to get started. The API URL is already filled in.</p>
+	<label for="gateway">API URL</label>
 	<input id="gateway" type="url" spellcheck="false" autocomplete="off">
 	<label for="apiKey">API key</label>
 	<input id="apiKey" type="password" spellcheck="false" autocomplete="off" placeholder="sk-or-v1-...">
@@ -748,7 +748,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Text
 					<div id="keyForm" hidden>
 						<input id="newKey" type="password" spellcheck="false" autocomplete="off" placeholder="API key (sk-or-v1-...)" aria-label="API key">
 						<input id="newKeyName" type="text" spellcheck="false" autocomplete="off" placeholder="Name (optional), e.g. Work" aria-label="Name for this key">
-						<input id="newKeyGateway" type="url" spellcheck="false" autocomplete="off" placeholder="Gateway URL" aria-label="Gateway URL">
+						<input id="newKeyGateway" type="url" spellcheck="false" autocomplete="off" placeholder="API URL" aria-label="API URL">
 						<p id="keyError" class="error-text" role="alert" hidden></p>
 						<div class="row">
 							<button id="saveKey" type="button">Save and use</button>
