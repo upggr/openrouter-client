@@ -64,6 +64,7 @@ export interface ModelInfo {
 }
 
 export type StreamEvent =
+	| { type: 'routedModel'; model: string }
 	| { type: 'text'; text: string }
 	| { type: 'reasoning'; text: string }
 	| { type: 'tool_call'; call: ToolCall }

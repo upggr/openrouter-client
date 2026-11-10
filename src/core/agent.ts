@@ -16,6 +16,7 @@ export interface PermissionRequest {
 }
 
 export type AgentEvent =
+	| { type: 'routedModel'; model: string }
 	| { type: 'text'; text: string }
 	| { type: 'reasoning'; text: string }
 	| { type: 'toolStart'; callId: string; tool: string; summary: string; args: Record<string, unknown> }
@@ -42,6 +43,8 @@ export interface AgentOptions {
 	getMode(): PermissionMode;
 	requestPermission(request: PermissionRequest): Promise<PermissionAnswer>;
 	onEvent(event: AgentEvent): void;
+	/** Called after approval, immediately before running a tool (for snapshots). */
+	beforeToolRun?(tool: string, args: Record<string, unknown>): Promise<void>;
 	/** Private per-project memory notes. */
 	memoryFile?: string;
 	/** Answers remembered with "always". Pass the same set across a conversation. */
@@ -171,7 +174,7 @@ export async function runAgent(options: AgentOptions): Promise<void> {
 			for await (const event of stream) {
 				if (signal?.aborted) { break; }
 				if (event.type === 'text') { text += event.text; onEvent(event); }
-				else if (event.type === 'reasoning') { onEvent(event); }
+				else if (event.type === 'reasoning' || event.type === 'routedModel') { onEvent(event); }
 				else if (event.type === 'tool_call') { calls.push(event.call); }
 				else if (event.type === 'usage') {
 					if (event.usage.promptTokens > 0) { calibration = Math.min(Math.max(event.usage.promptTokens / estimate, 0.5), 4); }
@@ -179,6 +182,7 @@ export async function runAgent(options: AgentOptions): Promise<void> {
 				}
 				else if (event.type === 'failover') {
 					contextWindow = event.contextWindow;
+					onEvent({ type: 'routedModel', model: event.model });
 					onEvent({ type: 'notice', message: `Automatic routing was rejected, so this request continues on ${event.name}.` });
 				}
 				else { finish = event.reason; }
@@ -260,20 +264,29 @@ async function executeCall(call: ToolCall, options: AgentOptions, remembered: Se
 	};
 	onEvent({ type: 'toolStart', callId: call.id, tool: name, summary, args });
 
-	const kind = tool.kind(args, context);
+	let kind: ToolKind;
+	try {
+		kind = await tool.kind(args, context);
+	} catch (error) {
+		return finish(onEvent, call.id, false, `Error: ${(error as Error).message}`);
+	}
 	const decision = decide(mode, kind);
 	if (decision === 'deny') {
 		return finish(onEvent, call.id, false, `${summary} is blocked in plan mode. Describe the change instead of making it.`);
 	}
-	const key = rememberKey(name, args);
-	if (decision === 'ask' && !remembered.has(key)) {
+	const key = rememberKey(name, args, kind);
+	// Sensitive actions always need fresh consent, even after an earlier "Always".
+	const canRemember = kind !== 'sensitiveRead' && kind !== 'sensitiveEdit';
+	if (decision === 'ask' && (!canRemember || !remembered.has(key))) {
 		const answer = await options.requestPermission({ callId: call.id, tool: name, kind, summary, args, preview: await previewOf(tool, args, context) });
 		if (answer === 'deny') {
 			return finish(onEvent, call.id, false, 'The user denied this action. Do not retry it. Ask what they want instead.');
 		}
-		if (answer === 'always') { remembered.add(key); }
+		if (answer === 'always' && canRemember) { remembered.add(key); }
 	}
 	try {
+		if (options.signal?.aborted) { return finish(onEvent, call.id, false, 'Stopped by the user.'); }
+		await options.beforeToolRun?.(name, args);
 		return finish(onEvent, call.id, true, await tool.run(args, context));
 	} catch (error) {
 		return finish(onEvent, call.id, false, `Error: ${(error as Error).message}`);
@@ -310,6 +323,7 @@ async function runSubagent(callId: string, args: Record<string, unknown>, option
 			maxTurns: SUBAGENT_MAX_TURNS,
 			spawnDepth: (options.spawnDepth ?? 1) - 1,
 			onEvent: event => {
+				if (event.type === 'routedModel') { onEvent(event); }
 				if (event.type === 'text') { result += event.text; }
 				// Re-emit sub-agent progress so the UI can group it, tagged with the parent call.
 				if (event.type === 'toolStart' || event.type === 'toolEnd') { onEvent({ ...event, callId: `${callId}:${event.callId}` }); }

@@ -33,6 +33,29 @@ export function addSpend(record: SpendRecord | undefined, cost: number, now = ne
 	return { month, total: (same ? record.total : 0) + cost, keyId };
 }
 
+/** Discards results from old connections and from out-of-order balance reads. */
+export class CreditRefreshGuard {
+	private connection: string | undefined;
+	private generation = 0;
+
+	reset(connection?: string): number {
+		this.connection = connection;
+		return ++this.generation;
+	}
+
+	begin(connection: string): number | undefined {
+		return this.connection === connection ? ++this.generation : undefined;
+	}
+
+	isCurrent(connection: string | undefined, generation: number): boolean {
+		return this.connection === connection && this.generation === generation;
+	}
+
+	matches(connection: string): boolean {
+		return this.connection === connection;
+	}
+}
+
 const SYMBOLS: Record<string, string> = { USD: '$', EUR: '€', GBP: '£' };
 
 export function money(value: number, currency?: string): string {
@@ -49,10 +72,12 @@ function level(remaining: number, limit: number): CreditLevel {
 export function creditStatus(record: SpendRecord | undefined, userLimit: number, live?: LiveLimit, now = new Date(), keyId?: string): CreditStatus {
 	if (live) {
 		const reset = live.resetsAt ? ` Resets ${live.resetsAt.slice(0, 10)}.` : '';
+		const localSpend = record?.month === currentMonth(now) && record.keyId === keyId ? record.total : 0;
+		const local = localSpend > 0 ? ` This month on this computer: ~${money(localSpend)} in reported request costs.` : '';
 		const what = live.scope === 'key' ? "this key's limit" : 'your OpenRouter credits';
 		return {
 			label: `${money(live.remaining, live.currency)} left`,
-			detail: `From ${what}: ${money(live.used, live.currency)} used of ${money(live.limit, live.currency)}${live.period ? ` (${live.period})` : ''}.${reset}`,
+			detail: `From ${what}: ${money(live.used, live.currency)} used of ${money(live.limit, live.currency)}${live.period ? ` (${live.period})` : ''}.${reset}${local}`,
 			level: live.reached ? 'empty' : level(live.remaining, live.limit),
 			live: true,
 		};

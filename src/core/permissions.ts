@@ -1,3 +1,5 @@
+import * as path from 'node:path';
+
 export type PermissionMode = 'default' | 'acceptEdits' | 'plan' | 'bypassPermissions';
 
 export type ToolKind = 'read' | 'sensitiveRead' | 'edit' | 'sensitiveEdit' | 'execute';
@@ -35,7 +37,15 @@ export function restorePermissionMode(saved: unknown, configured: unknown, bypas
 /**
  * Key for an "always allow" answer. Commands are remembered exactly, because a
  * prefix such as `git` would also approve `git status; rm -rf .`.
+ *
+ * File tools are remembered per path and per sensitivity class, so approving a
+ * harmless edit never also approves a secret or a file that runs code later on.
  */
-export function rememberKey(tool: string, args: Record<string, unknown>): string {
-	return tool === 'run_command' ? `run_command:${String(args.command)}` : tool;
+export function rememberKey(tool: string, args: Record<string, unknown>, kind?: ToolKind): string {
+	if (tool === 'run_command') { return `run_command:${String(args.command)}`; }
+	const target = typeof args.path === 'string' && args.path
+		? path.posix.normalize(args.path.replaceAll('\\', '/')).replace(/^\.\//, '')
+		: undefined;
+	if (!target) { return tool; }
+	return kind ? `${tool}:${kind}:${target}` : `${tool}:${target}`;
 }

@@ -19,7 +19,8 @@ type Args = Record<string, unknown>;
 
 export interface Tool {
 	schema: ToolSchema;
-	kind(args: Args, ctx: ToolContext): ToolKind;
+	/** Sensitivity of a call. May resolve symlinks, so it can be async. */
+	kind(args: Args, ctx: ToolContext): ToolKind | Promise<ToolKind>;
 	summary(args: Args): string;
 	run(args: Args, ctx: ToolContext): Promise<string>;
 	/** Before and after content for edit tools, used for diffs. */
@@ -36,13 +37,17 @@ const IGNORED_DIRS = new Set(['node_modules', '.git', 'dist', 'build', 'out', '.
 
 const SENSITIVE_NAME = /^(\.env(\..+)?|\.npmrc|\.netrc|\.pypirc|credentials(\.json)?|id_(rsa|dsa|ecdsa|ed25519)|.+\.(pem|key|p12|pfx))$/i;
 const SAFE_ENV_TEMPLATE = /^\.env\.(example|sample|template)$/i;
-const SENSITIVE_DIR = /(^|[\\/])\.(ssh|aws|gnupg)([\\/]|$)/;
+const SENSITIVE_DIR = /(^|[\\/])\.(ssh|aws|gnupg)([\\/]|$)/i;
 /** Writing here can run code without a separate command approval. */
-const EXECUTION_PATH = /(^|[\\/])(\.git|\.vscode|\.husky|\.devcontainer)([\\/]|$)/;
+const EXECUTION_PATH = /(^|[\\/])(\.git|\.vscode|\.husky|\.devcontainer)([\\/]|$)/i;
 
 export function isSensitivePath(p: string): boolean {
 	const name = path.basename(p);
-	return !SAFE_ENV_TEMPLATE.test(name) && (SENSITIVE_NAME.test(name) || SENSITIVE_DIR.test(p));
+	return SENSITIVE_DIR.test(p) || (!SAFE_ENV_TEMPLATE.test(name) && SENSITIVE_NAME.test(name));
+}
+
+function isExecutionPath(p: string): boolean {
+	return EXECUTION_PATH.test(p);
 }
 
 export function truncate(text: string, max = MAX_OUTPUT): string {
@@ -51,18 +56,28 @@ export function truncate(text: string, max = MAX_OUTPUT): string {
 	return `${text.slice(0, half)}\n\n[... ${text.length - max} characters omitted ...]\n\n${text.slice(-half)}`;
 }
 
-async function realpathOfExisting(target: string): Promise<string> {
-	let current = target;
-	const missing: string[] = [];
-	for (;;) {
+/** Resolves existing ancestors and dangling links before appending missing filenames. */
+async function realpathOfExisting(target: string, links = 0): Promise<string> {
+	if (links > 40) { throw new ToolError('Too many symbolic links in path.'); }
+	try {
+		return await fs.realpath(target);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== 'ENOENT') { throw error; }
+		let stat;
 		try {
-			return path.join(await fs.realpath(current), ...missing);
-		} catch {
-			const parent = path.dirname(current);
-			if (parent === current) { return target; }
-			missing.unshift(path.basename(current));
-			current = parent;
+			stat = await fs.lstat(target);
+		} catch (statError) {
+			if ((statError as NodeJS.ErrnoException).code !== 'ENOENT') { throw statError; }
 		}
+		if (stat?.isSymbolicLink()) {
+			const link = await fs.readlink(target);
+			return realpathOfExisting(path.resolve(path.dirname(target), link), links + 1);
+		}
+		// An existing non-link that failed realpath is not a safe missing filename.
+		if (stat) { throw error; }
+		const parent = path.dirname(target);
+		if (parent === target) { throw error; }
+		return path.join(await realpathOfExisting(parent, links), path.basename(target));
 	}
 }
 
@@ -82,13 +97,29 @@ function relative(ctx: ToolContext, absolute: string): string {
 	return path.relative(ctx.root, absolute) || '.';
 }
 
-function readKind(args: Args): ToolKind {
-	return isSensitivePath(String(args.path ?? '')) ? 'sensitiveRead' : 'read';
+/**
+ * Every spelling a call really touches, so a symlink such as `notes.md -> .env`
+ * or `hooks -> .git` is classified by its target and not by its alias. The raw
+ * argument is included because a file that does not exist yet cannot be resolved.
+ */
+async function inspectPaths(p: string, ctx: ToolContext): Promise<string[]> {
+	const absolute = path.resolve(ctx.root, p);
+	const spellings = [p, path.relative(ctx.root, absolute) || p];
+	if (!ctx.allowOutsideWorkspace) {
+		const real = await realpathOfExisting(absolute);
+		spellings.push(path.relative(await realpathOfExisting(ctx.root), real) || real, real);
+	}
+	return spellings;
 }
 
-function editKind(args: Args): ToolKind {
-	const p = String(args.path ?? '');
-	return isSensitivePath(p) || EXECUTION_PATH.test(p) ? 'sensitiveEdit' : 'edit';
+async function readKind(args: Args, ctx: ToolContext): Promise<ToolKind> {
+	const paths = await inspectPaths(String(args.path ?? ''), ctx);
+	return paths.some(isSensitivePath) ? 'sensitiveRead' : 'read';
+}
+
+async function editKind(args: Args, ctx: ToolContext): Promise<ToolKind> {
+	const paths = await inspectPaths(String(args.path ?? ''), ctx);
+	return paths.some(p => isSensitivePath(p) || isExecutionPath(p)) ? 'sensitiveEdit' : 'edit';
 }
 
 function schema(name: string, description: string, properties: object, required: string[]): ToolSchema {
@@ -212,7 +243,10 @@ const searchText: Tool = {
 		const results: string[] = [];
 		outer: for await (const file of walk(base, ctx.signal)) {
 			// Secrets are skipped here because a search would bypass their read approval.
-			if (isSensitivePath(file) && !ctx.allowOutsideWorkspace) { continue; }
+			if (!ctx.allowOutsideWorkspace) {
+				await resolvePath(file, ctx);
+				if (await readKind({ path: file }, ctx) === 'sensitiveRead') { continue; }
+			}
 			if (filter && !filter.test(path.relative(base, file).split(path.sep).join('/'))) { continue; }
 			const stat = await fs.stat(file);
 			if (stat.size > MAX_SEARCH_FILE) { continue; }
@@ -244,7 +278,7 @@ const writeFile: Tool = {
 		path: { type: 'string' },
 		content: { type: 'string' },
 	}, ['path', 'content']),
-	kind: (args) => editKind(args),
+	kind: (args, ctx) => editKind(args, ctx),
 	summary: a => `Write ${a.path}`,
 	async preview(args, ctx) {
 		const file = await resolvePath(args.path, ctx);
@@ -266,7 +300,7 @@ const editFile: Tool = {
 		new_string: { type: 'string' },
 		replace_all: { type: 'boolean' },
 	}, ['path', 'old_string', 'new_string']),
-	kind: (args) => editKind(args),
+	kind: (args, ctx) => editKind(args, ctx),
 	summary: a => `Edit ${a.path}`,
 	async preview(args, ctx) {
 		const file = await resolvePath(args.path, ctx);

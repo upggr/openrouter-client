@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { Attachment, ATTACHMENTS_OPEN, buildAttachedContent, canReadImages, MAX_ATTACHMENTS } from '../core/attachments';
-import { Checkpoints } from '../core/checkpoints';
+import { checkpointPath, Checkpoints } from '../core/checkpoints';
 import { SUMMARY_PREFIX, estimateTokens, outputTokenLimit } from '../core/context';
 import { AgentEvent, compact, PermissionAnswer, PermissionRequest, runAgent } from '../core/agent';
 import { BUY_URL } from '../core/credits';
@@ -67,6 +67,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Text
 	private readonly diffContent = new Map<string, string>();
 	private readonly subscriptions: vscode.Disposable[] = [];
 	private lastPromptTokens = 0;
+	/** Models reported during the current or most recent user request. */
+	private routedModels: string[] = [];
 	/** Per-model usage accumulated for this chat, used by /cost. */
 	private spend = new Map<string, { requests: number; cost: number; promptTokens: number; completionTokens: number; cachedTokens: number; reasoningTokens: number }>();
 	private restored = false;
@@ -117,6 +119,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Text
 		this.spend = new Map();
 		this.lastSent = undefined;
 		this.lastPromptTokens = 0;
+		this.routedModels = [];
 		await this.postTranscript();
 		await this.postState();
 	}
@@ -271,8 +274,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Text
 		this.lastCheckpoint = undefined;
 		const restored: string[] = [];
 		for (const file of [...checkpoint.files].reverse()) {
-			const abs = path.join(checkpoint.root, file.path);
 			try {
+				const abs = await checkpointPath(checkpoint.root, file.path);
 				if (file.before === undefined) {
 					await vscode.workspace.fs.delete(vscode.Uri.file(abs));
 				} else {
@@ -317,6 +320,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Text
 		const session = await this.store.load(id);
 		if (session) {
 			this.session = session;
+			this.routedModels = [];
 			this.remembered = new Set();
 			this.lastPromptTokens = estimateTokens(session.messages);
 			await this.postTranscript();
@@ -346,6 +350,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Text
 			buyUrl: BUY_URL,
 			models: models.map(m => ({ id: m.id, name: m.name, efforts: m.reasoningEfforts, contextWindow: m.contextWindow, deprecated: !!m.deprecatedAt })),
 			model: this.services.model,
+			routedModels: this.routedModels,
 			mode: this.services.mode,
 			includeSelection: this.context.workspaceState.get<boolean>('openrouter.includeSelection', true),
 			modes: PERMISSION_MODES,
@@ -442,6 +447,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Text
 
 		const abort = new AbortController();
 		this.abort = abort;
+		this.routedModels = [];
 		this.lastCheckpoint = undefined;
 		await this.postState();
 		await this.run(client, root, abort);
@@ -476,6 +482,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Text
 				spawnDepth: services.config.get<boolean>('subagents', true) ? 2 : 0,
 				getMode: () => services.mode,
 				requestPermission: request => this.requestPermission(request, abort.signal),
+				beforeToolRun: async (tool, args) => { await this.checkpoints?.capture(tool, args); },
 				onEvent: event => this.onAgentEvent(event),
 				remembered: this.remembered,
 				signal: abort.signal,
@@ -553,13 +560,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Text
 	}
 
 	private onAgentEvent(event: AgentEvent): void {
+		const routed = event.type === 'routedModel' ? event.model : event.type === 'usage' ? event.usage.model : undefined;
+		if (routed && routed !== 'auto' && routed !== 'openrouter/auto' && !this.routedModels.includes(routed)) {
+			this.routedModels.push(routed);
+		}
 		if (event.type === 'compacted') {
 			this.archive(event.removed);
 			return;
-		}
-		if (event.type === 'toolStart') {
-			// Snapshot the target before the edit lands, so the whole turn can be rewound.
-			void this.checkpoints?.capture(event.tool, event.args);
 		}
 		if (event.type === 'usage') {
 			this.lastPromptTokens = event.usage.promptTokens;
@@ -688,7 +695,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Text
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource}; script-src 'nonce-${nonce}';">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src ${webview.cspSource}; script-src 'nonce-${nonce}';">
 <link rel="stylesheet" href="${uri('chat.css')}">
 <title>OpenRouter Client</title>
 </head>
@@ -773,8 +780,9 @@ async function readFileOrUndefined(absPath: string): Promise<string | undefined>
 	try {
 		const raw = await vscode.workspace.fs.readFile(vscode.Uri.file(absPath));
 		return Buffer.from(raw).toString('utf8');
-	} catch {
-		return undefined;
+	} catch (error) {
+		if (error instanceof vscode.FileSystemError && error.code === 'FileNotFound') { return undefined; }
+		throw error;
 	}
 }
 

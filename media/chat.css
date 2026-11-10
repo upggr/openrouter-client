@@ -27,7 +27,7 @@ select:hover { border-color: var(--vscode-focusBorder); }
 button.chip.model-chip { display: inline-flex; align-items: center; gap: 5px; padding: 3px 9px; border-radius: 999px; font-size: 0.85em; color: var(--vscode-foreground); background: var(--vscode-editor-background); border: 1px solid var(--vscode-dropdown-border, var(--vscode-panel-border)); }
 button.chip.model-chip:hover { border-color: var(--vscode-focusBorder); }
 .model-symbol { color: var(--vscode-textLink-foreground); }
-#modelName { max-width: 150px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-weight: 600; }
+#modelName { max-width: 240px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-weight: 600; }
 .chev { color: var(--vscode-descriptionForeground); font-size: 0.9em; }
 button.icon.send { width: 28px; height: 28px; padding: 0; border-radius: 50%; font-size: 0.9em; display: inline-flex; align-items: center; justify-content: center; }
 button.icon.ghost { height: 26px; padding: 0 6px; border-radius: 6px; font-size: 1em; color: var(--vscode-descriptionForeground); background: none; }

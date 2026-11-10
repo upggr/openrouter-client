@@ -276,7 +276,8 @@
 			diff.addEventListener('click', () => post('openDiff', { id: event.callId }));
 			buttons.appendChild(diff);
 		}
-		[['Allow', 'allow', ''], ['Always', 'always', 'secondary'], ['Deny', 'deny', 'secondary']].forEach(([label, value, cls]) => {
+		// Sensitive actions are never remembered, so "Always" is not offered for them.
+		[['Allow', 'allow', ''], ['Always', 'always', 'secondary'], ['Deny', 'deny', 'secondary']].filter(choice => !(event.sensitive && choice[1] === 'always')).forEach(([label, value, cls]) => {
 			const button = element('button', cls, label);
 			button.type = 'button';
 			button.dataset.answer = value;
@@ -377,6 +378,9 @@
 		renderStatus();
 		switch (event.type) {
 			case 'user': {
+				state.routedModels = [];
+				state.liveModel = undefined;
+				drawModel();
 				endAssistant();
 				activity = null;
 				liveChars = 0;
@@ -424,9 +428,11 @@
 			case 'toolEnd':
 				endTool(event.callId, event.ok, event.output);
 				break;
+			case 'routedModel':
+				reportRoutedModel(event.model);
+				break;
 			case 'usage': {
-				if (event.usage.model && state.model === 'auto') { $('model').title = 'Routed to ' + event.usage.model; }
-				if (event.usage.model) { state.liveModel = event.usage.model; }
+				reportRoutedModel(event.usage.model);
 				const total = (event.usage.promptTokens || 0) + (event.usage.completionTokens || 0);
 				if (event.usage.cost && total > 0) { costRates.set(event.usage.model || state.model, event.usage.cost / total); }
 				showContext(event.usage);
@@ -562,8 +568,32 @@
 		meter.title = parts.join(', ');
 	}
 
+	function drawModel() {
+		const selected = (state.models || []).find(m => m.id === state.model);
+		const auto = state.model === 'auto' || state.model === 'openrouter/auto';
+		const routed = auto ? (state.routedModels || []) : [];
+		const names = routed.map(id => {
+			const model = (state.models || []).find(m => m.id === id);
+			return model ? model.name : id;
+		});
+		const label = auto ? 'Auto' : (selected && selected.deprecated ? '⚠ ' : '') + (selected ? selected.name : state.model);
+		const text = label + (names.length ? ' · ' + names.join(', ') : '');
+		$('modelName').textContent = text;
+		$('model').title = 'Choose model · ' + state.model + (routed.length ? '\nRouted to: ' + routed.join(', ') : '');
+		$('model').setAttribute('aria-label', 'Choose model: ' + text);
+	}
+
+	function reportRoutedModel(model) {
+		if (!model || model === 'auto' || model === 'openrouter/auto') { return; }
+		state.routedModels = state.routedModels || [];
+		if (!state.routedModels.includes(model)) { state.routedModels.push(model); }
+		state.liveModel = model;
+		drawModel();
+	}
+
 	function applyState(next) {
-		state = next;
+		state = { ...next, routedModels: [...(next.routedModels || [])] };
+		state.liveModel = state.routedModels.at(-1);
 		if (!next.hasKey || setupOpen) {
 			if (!$('gateway').value) { $('gateway').value = next.gateway; }
 		}
@@ -571,10 +601,7 @@
 		if (!next.hasKey) { closeKeyMenu(); return; }
 
 		const models = next.models.length ? next.models : [{ id: next.model, name: next.model, efforts: [] }];
-		const selected = models.find(m => m.id === next.model);
-		$('modelName').textContent = (selected && selected.deprecated ? '⚠ ' : '') + (selected ? selected.name : next.model);
-		$('model').title = 'Choose model · ' + next.model;
-		$('model').setAttribute('aria-label', 'Choose model: ' + (selected ? selected.name : next.model));
+		drawModel();
 		$('includeSelection').checked = next.includeSelection !== false;
 		fillToggle($('mode'), next.modes.map(m => ({ value: m.id, label: m.short || m.label, title: m.label + ': ' + m.detail })), next.mode);
 		$('mode').classList.toggle('danger', next.mode === 'bypassPermissions');

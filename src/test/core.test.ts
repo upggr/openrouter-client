@@ -8,7 +8,7 @@ import { after, before, test } from 'node:test';
 import { compact, runAgent, withCacheMarkers, AgentEvent, PermissionAnswer } from '../core/agent';
 import { buildAttachedContent, canReadImages, truncateAttachmentText } from '../core/attachments';
 import { compactLimit, compactionCut, DEFAULT_OUTPUT_TOKENS, estimateTokens, keepTokensFor, outputTokenLimit, flattenForSummary, looksLikeOverflow, trimForRequest } from '../core/context';
-import { addSpend, creditStatus } from '../core/credits';
+import { addSpend, creditStatus, CreditRefreshGuard } from '../core/credits';
 import { bestScore, blendedPrice, families, filterModels, formatContext, formatPrice, groupModels, isFree, priceVaries, sortModels } from '../core/modelPicker';
 import { Checkpoints } from '../core/checkpoints';
 import { LiveLimit } from '../core/gateway';
@@ -113,6 +113,31 @@ function failoverGateway(models: object, rejection = REJECTED) {
 	};
 	return used;
 }
+
+test('stream identifies routed models before output and without waiting for usage', async () => {
+	handler = (_req, res) => sse(res, [
+		{ model: 'vendor/model-a', choices: [{ delta: { content: 'hello' } }] },
+		{ model: 'vendor/model-a', choices: [{ delta: { content: ' again' } }] },
+		{ model: 'vendor/model-b', choices: [{ delta: { content: 'world' }, finish_reason: 'stop' }] },
+	]);
+	const events = await collect(client().streamChat({ model: 'openrouter/auto', messages: [] }));
+	assert.deepEqual(events.filter(e => e.type === 'routedModel'), [
+		{ type: 'routedModel', model: 'vendor/model-a' },
+		{ type: 'routedModel', model: 'vendor/model-b' },
+	]);
+	assert.deepEqual(events[0], { type: 'routedModel', model: 'vendor/model-a' });
+	assert.equal(events[1].type, 'text');
+});
+
+test('agent forwards routed model events to the UI', async () => {
+	const { root, clean } = workspace();
+	try {
+		const events: AgentEvent[] = [];
+		const stream = scripted([[{ type: 'routedModel', model: 'vendor/model-a' }, say('hello')]]);
+		await runAgent(agentOptions(stream, root, 'default', 'deny', events));
+		assert.deepEqual(events[0], { type: 'routedModel', model: 'vendor/model-a' });
+	} finally { clean(); }
+});
 
 test('auto fails over to a tool-capable model and stays there', async () => {
 	const used = failoverGateway(FAILOVER_MODELS);
@@ -358,12 +383,38 @@ test('permission policy', () => {
 	];
 	for (const [mode, kind, decision] of expected) { assert.equal(decide(mode, kind), decision, `${mode}/${kind}`); }
 	assert.equal(rememberKey('run_command', { command: 'git status' }), 'run_command:git status');
-	assert.equal(rememberKey('edit_file', { path: 'a' }), 'edit_file');
+	assert.equal(rememberKey('edit_file', { path: './a' }, 'edit'), 'edit_file:edit:a');
+	assert.notEqual(rememberKey('edit_file', { path: 'a' }, 'edit'), rememberKey('edit_file', { path: 'b' }, 'edit'));
+	assert.notEqual(rememberKey('edit_file', { path: 'a' }, 'edit'), rememberKey('edit_file', { path: 'a' }, 'sensitiveEdit'));
 });
 
 test('sensitive path detection', () => {
 	for (const p of ['.env', 'a/.env.local', 'id_rsa', 'x/server.pem', '/home/me/.ssh/config', '.npmrc']) { assert.ok(isSensitivePath(p), p); }
 	for (const p of ['.env.example', 'src/index.ts', 'keyboard.ts']) { assert.ok(!isSensitivePath(p), p); }
+});
+
+test('live credit balance stays authoritative and local request costs are labelled separately', () => {
+	const live: LiveLimit = { limit: 10, used: 4, remaining: 6, reached: false, scope: 'account', currency: 'USD' };
+	const now = new Date('2026-11-08T12:00:00Z');
+	const record = addSpend(undefined, 0.25, now, 'connection-a');
+	const status = creditStatus(record, 0, live, now, 'connection-a');
+	assert.equal(status.label, '$6.00 left');
+	assert.match(status.detail, /this computer: ~\$0\.2500 in reported request costs/);
+	assert.doesNotMatch(creditStatus(record, 0, live, now, 'connection-b').detail, /this computer/);
+});
+
+test('credit refresh guard ignores stale responses and old connections', () => {
+	const guard = new CreditRefreshGuard();
+	guard.reset('connection-a');
+	const first = guard.begin('connection-a')!;
+	const second = guard.begin('connection-a')!;
+	assert.equal(guard.isCurrent('connection-a', first), false);
+	assert.equal(guard.isCurrent('connection-a', second), true);
+	guard.reset('connection-b');
+	assert.equal(guard.matches('connection-a'), false);
+	assert.equal(guard.begin('connection-a'), undefined);
+	assert.equal(guard.isCurrent('connection-a', second), false);
+	assert.equal(guard.matches('connection-b'), true);
 });
 
 test('glob matching', () => {
@@ -386,9 +437,12 @@ test('workspace boundary blocks traversal and symlinks', async () => {
 	try {
 		fs.writeFileSync(path.join(outside, 's.txt'), 'secret');
 		fs.symlinkSync(outside, path.join(root, 'link'));
+		fs.symlinkSync(path.join(outside, 'missing-target.txt'), path.join(root, 'dangling'));
 		await assert.rejects(tool('read_file').run({ path: '../x' }, ctx), /outside the workspace/);
 		await assert.rejects(tool('read_file').run({ path: 'link/s.txt' }, ctx), /outside the workspace/);
 		await assert.rejects(tool('write_file').run({ path: 'link/new.txt', content: 'x' }, ctx), /outside the workspace/);
+		await assert.rejects(tool('write_file').run({ path: 'dangling', content: 'x' }, ctx), /outside the workspace/);
+		assert.ok(!fs.existsSync(path.join(outside, 'missing-target.txt')));
 		assert.match(await tool('read_file').run({ path: path.join(outside, 's.txt') }, { ...ctx, allowOutsideWorkspace: true }), /secret/);
 	} finally {
 		clean();
@@ -411,10 +465,15 @@ test('search skips secrets and dependency folders', async () => {
 	const { root, ctx, clean } = workspace();
 	try {
 		fs.writeFileSync(path.join(root, '.env'), 'NEEDLE=1');
+		fs.symlinkSync('.env', path.join(root, 'alias.txt'));
+		fs.mkdirSync(path.join(root, '.ssh'));
+		fs.writeFileSync(path.join(root, '.ssh', '.env.example'), 'NEEDLE=2');
+		fs.symlinkSync('.ssh', path.join(root, 'sshdir'), 'dir');
 		fs.writeFileSync(path.join(root, 'a.ts'), 'NEEDLE');
 		fs.mkdirSync(path.join(root, 'node_modules'));
 		fs.writeFileSync(path.join(root, 'node_modules', 'b.ts'), 'NEEDLE');
 		assert.equal(await tool('search_text').run({ pattern: 'NEEDLE' }, ctx), 'a.ts:1:NEEDLE');
+		assert.equal(await tool('search_text').run({ pattern: 'NEEDLE', path: 'sshdir' }, ctx), 'No matches.');
 	} finally { clean(); }
 });
 
@@ -431,12 +490,35 @@ test('commands report exit codes, time out and hide the API key', async () => {
 	}
 });
 
-test('editing .vscode or secrets is classed as sensitive', () => {
-	const ctx = { root: '/', allowOutsideWorkspace: false, commandTimeoutSeconds: 1 };
-	assert.equal(tool('write_file').kind({ path: '.vscode/tasks.json' }, ctx), 'sensitiveEdit');
-	assert.equal(tool('edit_file').kind({ path: '.git/hooks/pre-commit' }, ctx), 'sensitiveEdit');
-	assert.equal(tool('read_file').kind({ path: '.env' }, ctx), 'sensitiveRead');
-	assert.equal(tool('write_file').kind({ path: 'src/a.ts' }, ctx), 'edit');
+test('editing .vscode or secrets is classed as sensitive, including case variants', async () => {
+	const { ctx, clean } = workspace();
+	try {
+		for (const p of ['.vscode/tasks.json', '.VSCode/tasks.json', '.GIT/hooks/pre-commit', '.git/hooks/pre-commit']) {
+			assert.equal(await tool('write_file').kind({ path: p }, ctx), 'sensitiveEdit', p);
+			assert.equal(await tool('edit_file').kind({ path: p }, ctx), 'sensitiveEdit', p);
+		}
+		assert.equal(await tool('read_file').kind({ path: '.env' }, ctx), 'sensitiveRead');
+		assert.equal(await tool('write_file').kind({ path: 'src/a.ts' }, ctx), 'edit');
+		assert.equal(await tool('read_file').kind({ path: '.AWS/config' }, ctx), 'sensitiveRead');
+	} finally { clean(); }
+});
+
+test('sensitive classification follows symlinks to files and existing parent directories', async () => {
+	const { root, ctx, clean } = workspace();
+	try {
+		fs.mkdirSync(path.join(root, '.git', 'hooks'), { recursive: true });
+		fs.writeFileSync(path.join(root, '.env'), 'SECRET=private');
+		fs.symlinkSync('.env', path.join(root, 'notes.md'));
+		fs.symlinkSync('.git', path.join(root, 'hooksdir'), 'dir');
+		// A dangling link is judged by where a write through it would land.
+		fs.symlinkSync('credentials.json', path.join(root, 'todo.txt'));
+		assert.equal(await tool('read_file').kind({ path: 'notes.md' }, ctx), 'sensitiveRead');
+		for (const name of ['write_file', 'edit_file']) {
+			assert.equal(await tool(name).kind({ path: 'notes.md' }, ctx), 'sensitiveEdit');
+			assert.equal(await tool(name).kind({ path: 'hooksdir/hooks/new-hook' }, ctx), 'sensitiveEdit');
+			assert.equal(await tool(name).kind({ path: 'todo.txt' }, ctx), 'sensitiveEdit');
+		}
+	} finally { clean(); }
 });
 
 function scripted(turns: StreamEvent[][]): ChatStreamer & { requests: ChatMessage[][] } {
@@ -557,6 +639,81 @@ test('an always answer for one command does not approve a different one', async 
 		await runAgent({ ...agentOptions(stream, root, 'default', 'always', []), requestPermission: async r => { asked.push(String(r.args.command)); return r.args.command === 'echo a' ? 'always' : 'deny'; } });
 		assert.deepEqual(asked, ['echo a', 'echo a; touch z']);
 		assert.deepEqual(fs.readdirSync(root), []);
+	} finally { clean(); }
+});
+
+test('always approvals are scoped to a file and never skip sensitive edit consent', async () => {
+	const { root, clean } = workspace();
+	try {
+		for (const name of ['write_file', 'edit_file']) {
+			fs.writeFileSync(path.join(root, 'notes.txt'), 'old');
+			fs.writeFileSync(path.join(root, 'other.txt'), 'old');
+			const args = (p: string) => ({ path: p, content: 'new', old_string: 'old', new_string: 'new' });
+			const stream = scripted([
+				[call('1', name, args('notes.txt'))],
+				[call('2', name, args('./notes.txt'))],
+				[call('3', name, args('other.txt'))],
+				[call('4', name, args('.git/hooks/pre-commit'))],
+				[call('5', name, args('.env'))],
+				[say('ok')],
+			]);
+			const asked: string[] = [];
+			await runAgent({
+				...agentOptions(stream, root, 'default', 'deny', []), maxTurns: 6,
+				requestPermission: async r => {
+					asked.push(String(r.args.path));
+					return r.args.path === 'notes.txt' ? 'always' : 'deny';
+				},
+			});
+			assert.deepEqual(asked, ['notes.txt', 'other.txt', '.git/hooks/pre-commit', '.env'], name);
+			assert.equal(fs.readFileSync(path.join(root, 'other.txt'), 'utf8'), 'old');
+			assert.ok(!fs.existsSync(path.join(root, '.env')));
+			assert.ok(!fs.existsSync(path.join(root, '.git')));
+		}
+	} finally { clean(); }
+});
+
+test('sensitive reads and edits always need fresh approval, even for the same path', async () => {
+	const { root, clean } = workspace();
+	try {
+		fs.writeFileSync(path.join(root, '.env'), 'SECRET=old');
+		for (const name of ['read_file', 'write_file', 'edit_file']) {
+			let asked = 0;
+			const args = { path: '.env', content: 'SECRET=new', old_string: 'old', new_string: 'new' };
+			const stream = scripted([[call('1', name, args)], [call('2', name, args)], [say('ok')]]);
+			await runAgent({ ...agentOptions(stream, root, 'default', 'deny', []), requestPermission: async () => { asked++; return 'always'; } });
+			assert.equal(asked, 2, name);
+		}
+	} finally { clean(); }
+});
+
+test('acceptEdits and plan mode require consent to access symlinked secrets', async () => {
+	const { root, clean } = workspace();
+	try {
+		fs.writeFileSync(path.join(root, '.env'), 'SECRET=old');
+		fs.mkdirSync(path.join(root, '.git', 'hooks'), { recursive: true });
+		fs.symlinkSync('.env', path.join(root, 'notes.md'));
+		fs.symlinkSync('.git', path.join(root, 'hooksdir'), 'dir');
+		const asked: string[] = [];
+		const stream = scripted([
+			[call('1', 'read_file', { path: 'notes.md' })],
+			[call('2', 'write_file', { path: 'hooksdir/hooks/new-hook', content: 'unapproved' })],
+			[call('3', 'write_file', { path: '.GIT/hooks/new-hook', content: 'unapproved' })],
+			[say('ok')],
+		]);
+		await runAgent({
+			...agentOptions(stream, root, 'acceptEdits', 'deny', []),
+			requestPermission: async r => { asked.push(r.kind); return 'deny'; },
+		});
+		assert.deepEqual(asked, ['sensitiveRead', 'sensitiveEdit', 'sensitiveEdit']);
+		assert.ok(!fs.existsSync(path.join(root, '.git', 'hooks', 'new-hook')));
+		const plan = scripted([[call('1', 'read_file', { path: 'notes.md' })], [say('ok')]]);
+		await runAgent({
+			...agentOptions(plan, root, 'plan', 'deny', []),
+			requestPermission: async r => { asked.push(r.kind); return 'deny'; },
+		});
+		assert.equal(asked.at(-1), 'sensitiveRead');
+		assert.ok(!JSON.stringify(plan.requests).includes('SECRET=old'));
 	} finally { clean(); }
 });
 
@@ -743,6 +900,56 @@ test('a new file captured by a checkpoint rewinds to deletion', async () => {
 	assert.equal(store.has('fresh.ts'), false, 'new file removed on rewind');
 });
 
+test('checkpoints never read, restore or delete paths outside the workspace', async () => {
+	const { root, clean } = workspace();
+	const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'OpenRouter Client-cp-out-'));
+	try {
+		const target = path.join(outside, 'precious.txt');
+		fs.writeFileSync(target, 'outside data');
+		fs.symlinkSync(outside, path.join(root, 'escape'));
+		fs.writeFileSync(path.join(root, 'inside.txt'), 'before');
+		const read = async (abs: string) => fs.existsSync(abs) ? fs.readFileSync(abs, 'utf8') : undefined;
+		const cp = new Checkpoints(read, (r, rel) => path.join(r, rel), root);
+		for (const bad of ['../outside/precious.txt', target, 'escape/precious.txt', 'escape/missing.txt', '.', '']) {
+			await cp.capture('write_file', { path: bad });
+		}
+		assert.equal(cp.count, 0, 'escaping paths are ignored at capture time');
+
+		await cp.capture('write_file', { path: 'inside.txt' });
+		await cp.capture('edit_file', { path: './inside.txt' });
+		assert.equal(cp.count, 1, 'equivalent paths collapse to one entry');
+		// If the agent later swaps a captured file for a symlink outside, rewind skips it.
+		fs.unlinkSync(path.join(root, 'inside.txt'));
+		fs.symlinkSync(target, path.join(root, 'inside.txt'));
+		const restored = await cp.rewind(async (abs, content) => {
+			if (content === undefined) { fs.rmSync(abs, { force: true }); } else { fs.writeFileSync(abs, content); }
+		});
+		assert.deepEqual(restored, []);
+		assert.equal(fs.readFileSync(target, 'utf8'), 'outside data');
+	} finally {
+		clean();
+		fs.rmSync(outside, { recursive: true, force: true });
+	}
+});
+
+test('beforeToolRun runs only after approval, so denied or escaped calls are not snapshotted', async () => {
+	const { root, clean } = workspace();
+	try {
+		const captured: string[] = [];
+		const stream = scripted([
+			[call('1', 'write_file', { path: 'denied.txt', content: 'x' })],
+			[call('2', 'write_file', { path: 'allowed.txt', content: 'x' })],
+			[say('done')],
+		]);
+		await runAgent({
+			...agentOptions(stream, root, 'default', 'deny', []),
+			requestPermission: async r => r.args.path === 'allowed.txt' ? 'allow' : 'deny',
+			beforeToolRun: async (_tool, args) => { captured.push(String(args.path)); },
+		});
+		assert.deepEqual(captured, ['allowed.txt']);
+	} finally { clean(); }
+});
+
 test('key masking shows just enough to tell keys apart', () => {
 	assert.equal(maskKey('sk-or-v1-1b8260744efa9a734dae8c78aada785d'), 'sk-or-v1-…785d');
 	assert.equal(maskKey('short'), '••••');
@@ -901,8 +1108,8 @@ test('memory saves, avoids duplicates, removes and survives across chats', async
 		assert.equal(await tool('forget').run({ text: 'PNPM' }, withMemory), 'Removed 1 notes.');
 		assert.equal(await readMemory(file), '- Deploys to Coolify');
 		await assert.rejects(tool('remember').run({ note: 'x' }, ctx), /not available/);
-		assert.equal(tool('remember').kind({}, ctx), 'edit');
-		assert.equal(decide('plan', tool('remember').kind({}, ctx)), 'deny');
+		assert.equal(await tool('remember').kind({}, ctx), 'edit');
+		assert.equal(decide('plan', await tool('remember').kind({}, ctx)), 'deny');
 	} finally { clean(); }
 });
 

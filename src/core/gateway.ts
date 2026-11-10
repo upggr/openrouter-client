@@ -245,6 +245,7 @@ export class GatewayClient implements ChatStreamer {
 			throw new GatewayError('OpenRouter returned an empty response.');
 		}
 		const calls = new Map<number, ToolCall>();
+		let reportedModel: string | undefined;
 		for await (const data of readSse(response.body, signal)) {
 			touch();
 			if (data === '[DONE]') { break; }
@@ -256,6 +257,10 @@ export class GatewayClient implements ChatStreamer {
 			}
 			if (chunk.error) {
 				throw new GatewayError(this.redact(chunk.error.message ?? 'OpenRouter reported an error.'));
+			}
+			if (chunk.model && chunk.model !== reportedModel) {
+				reportedModel = chunk.model;
+				yield { type: 'routedModel', model: reportedModel };
 			}
 			const choice = chunk.choices?.[0];
 			const delta = choice?.delta;

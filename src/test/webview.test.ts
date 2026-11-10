@@ -47,6 +47,25 @@ function load() {
 	return { dom, posted, send, $, win };
 }
 
+test('webview CSP allows data images but not remote images', () => {
+	const sidebar = fs.readFileSync(path.join(__dirname, '..', '..', 'src', 'vscode', 'sidebar.ts'), 'utf8');
+	const csp = sidebar.match(/Content-Security-Policy" content="([^"]+)"/)?.[1];
+	assert.ok(csp);
+	assert.match(csp, /(?:^|;\s*)default-src 'none'\s*;/);
+	assert.match(csp, /(?:^|;\s*)img-src data:\s*;/);
+	assert.match(csp, /script-src 'nonce-\$\{nonce\}'/);
+});
+
+test('attached image previews use data URLs in the transcript', () => {
+	const { send, win } = load();
+	const image = 'data:image/png;base64,aGVsbG8=';
+	send(STATE);
+	send({ type: 'event', event: { type: 'user', text: 'See image', attachments: [{ name: 'image.png', isImage: true, dataUrl: image }] } });
+	assert.equal(win.document.querySelector('img.thumb')?.getAttribute('src'), image);
+	send({ type: 'transcript', items: [{ kind: 'user', text: 'See image', imageUrl: image }] });
+	assert.equal(win.document.querySelector('img.thumb')?.getAttribute('src'), image);
+});
+
 test('markdown escapes HTML and blocks unsafe links', () => {
 	const html = render('<img src=x onerror=alert(1)> [a](javascript:alert(1)) `<b>` **x**');
 	assert.ok(!html.includes('<img'));
@@ -101,6 +120,35 @@ test('state fills pickers, per-model effort, credits and context use', () => {
 	// Non-default choices surface as badges on the collapsed Options row.
 	assert.equal($('modeBadge').hidden, false);
 	assert.ok($('modeBadge').className.includes('danger'));
+});
+
+test('Auto displays routed models as soon as reported and keeps them across state refreshes', () => {
+	const { send, $, dom } = load();
+	const auto = { ...STATE, model: 'auto', routedModels: [] as string[] };
+	send(auto);
+	assert.equal($('modelName').textContent, 'Auto');
+	send({ type: 'event', event: { type: 'routedModel', model: 'a' } });
+	assert.equal($('modelName').textContent, 'Auto · A');
+	send({ type: 'event', event: { type: 'usage', usage: { model: 'a', promptTokens: 10 } } });
+	send({ type: 'event', event: { type: 'routedModel', model: 'b' } });
+	assert.equal($('modelName').textContent, 'Auto · A, B', 'duplicates are omitted');
+	assert.match($('model').title, /Routed to: a, b/);
+	assert.equal($('model').getAttribute('aria-label'), 'Choose model: Auto · A, B');
+	send({ ...auto, routedModels: ['a', 'b'] });
+	assert.equal($('modelName').textContent, 'Auto · A, B', 'host state retains routing');
+	send({ ...auto, model: 'openrouter/auto', routedModels: ['a', 'b'] });
+	assert.equal($('modelName').textContent, 'Auto · A, B', 'canonical auto id works too');
+	send({ ...auto, model: 'a', routedModels: ['b'] });
+	assert.equal($('modelName').textContent, 'A', 'explicit model selection stays unchanged');
+	send(auto);
+	send({ type: 'event', event: { type: 'routedModel', model: '<unknown/model>' } });
+	assert.equal($('modelName').textContent, 'Auto · <unknown/model>');
+	assert.equal($('modelName').children.length, 0, 'unknown names are plain text');
+	send({ type: 'event', event: { type: 'user', text: 'Next request' } });
+	assert.equal($('modelName').textContent, 'Auto', 'next request clears previous routes');
+	send({ type: 'event', event: { type: 'usage', usage: { model: 'b' } } });
+	assert.equal($('modelName').textContent, 'Auto · B', 'usage-only gateways still identify the model');
+	dom.window.close();
 });
 
 test('sending, model changes and Enter post the right messages', () => {
@@ -258,6 +306,7 @@ test('permission card answers once and tool output is plain text', () => {
 	const allow = win.document.querySelector('[data-answer="allow"]') as HTMLButtonElement;
 	assert.ok(allow);
 	assert.ok(win.document.querySelector('.warning'));
+	assert.equal(win.document.querySelector('[data-answer="always"]'), null, 'sensitive actions cannot be always-allowed');
 	allow.click();
 	assert.deepEqual(posted.at(-1), { type: 'permission', id: 'c', answer: 'allow' });
 	assert.equal(win.document.querySelector('.permission-card'), null);

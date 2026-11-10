@@ -127,7 +127,9 @@ async function askInModal(request: PermissionRequest): Promise<PermissionAnswer>
 	const allow = 'Allow';
 	const always = 'Always Allow';
 	const detail = request.tool === 'run_command' ? String(request.args.command) : request.preview?.path ?? String(request.args.path ?? '');
-	const choice = await vscode.window.showWarningMessage(`OpenRouter Client wants to: ${request.summary}`, { modal: true, detail }, allow, always);
+	// Sensitive actions are never remembered, so "Always" is not offered for them.
+	const sensitive = request.kind === 'sensitiveRead' || request.kind === 'sensitiveEdit';
+	const choice = await vscode.window.showWarningMessage(`OpenRouter Client wants to: ${request.summary}`, { modal: true, detail }, ...(sensitive ? [allow] : [allow, always]));
 	return choice === allow ? 'allow' : choice === always ? 'always' : 'deny';
 }
 

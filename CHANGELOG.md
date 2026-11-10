@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.2
+
+- Show the actual routed model(s) next to Auto as soon as OpenRouter identifies them, retaining the latest request's routing across UI refreshes.
+
+## 0.1.1
+
+- Refresh the OpenRouter credit balance after requests so spending is reflected in the status bar and chat.
+- Fix previews for pasted and attached images without allowing remote images in the chat view.
+- Scope remembered file approvals to individual paths and always ask for sensitive actions.
+- Protect sensitive paths reached through symlinks and prevent checkpoint rewind from escaping the workspace.
+
 ## 0.1.0
 
 First release. An AI chat and coding agent for VS Code that talks to OpenRouter.

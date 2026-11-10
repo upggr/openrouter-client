@@ -1,7 +1,7 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
-import { addSpend, BUY_URL, creditStatus, CreditStatus, SpendRecord } from '../core/credits';
+import { addSpend, BUY_URL, creditStatus, CreditRefreshGuard, CreditStatus, SpendRecord } from '../core/credits';
 import { DEFAULT_BASE_URL, GatewayClient, GatewayError, LiveLimit, normalizeBaseUrl } from '../core/gateway';
 import { defaultKeyLabel, KeyState, keyStates, maskKey, StoredKey } from '../core/keyring';
 import { addMemory, readMemory } from '../core/memory';
@@ -18,6 +18,13 @@ const SPEND_STATE = 'openrouter.spend';
 const BYPASS_ACK_STATE = 'openrouter.bypassAcknowledged';
 /** Remembers the picker's sort between sessions. */
 const MODEL_SORT_STATE = 'openrouter.modelSort';
+/** The gateway may settle usage after the request has finished. */
+const CREDIT_REFRESH_DELAYS_MS = [5_000, 15_000, 30_000, 60_000];
+
+/** Keep connection identity and stored spend keys distinct without storing API keys. */
+function connectionId(apiKey: string, baseUrl: string): string {
+	return createHash('sha256').update(JSON.stringify([apiKey, baseUrl])).digest('hex');
+}
 
 export type Surface = 'sidebar' | 'chat-participant' | 'model-provider';
 
@@ -34,8 +41,10 @@ export class Services implements vscode.Disposable {
 	private liveLimit: LiveLimit | undefined;
 	private keyPresent = false;
 	private keyHealth: 'ok' | 'rejected' | 'unknown' = 'unknown';
-	/** Sync cache of the stored key, refreshed in keyChanged, so sync getters can fingerprint it. */
-	private activeKey: string | undefined;
+	private readonly creditGuard = new CreditRefreshGuard();
+	private creditConnection: string | undefined;
+	private creditRefreshTimers: ReturnType<typeof setTimeout>[] = [];
+	private spendUpdates: Promise<void> = Promise.resolve();
 
 	constructor(private readonly context: vscode.ExtensionContext) {
 		this.currentMode = restorePermissionMode(
@@ -63,6 +72,8 @@ export class Services implements vscode.Disposable {
 	}
 
 	dispose(): void {
+		this.creditGuard.reset();
+		this.clearCreditTimers();
 		vscode.Disposable.from(...this.subscriptions).dispose();
 	}
 
@@ -98,9 +109,9 @@ export class Services implements vscode.Disposable {
 		return creditStatus(this.context.globalState.get<SpendRecord>(SPEND_STATE), this.config.get<number>('monthlySpendLimit', 0), this.liveLimit, new Date(), this.activeKeyId);
 	}
 
-	/** Fingerprint of the active key, so local spend is not mixed across keys. */
+	/** Fingerprint of the active connection, so local spend is not mixed across keys. */
 	private get activeKeyId(): string | undefined {
-		return this.activeKey?.slice(0, 8);
+		return this.creditConnection;
 	}
 
 	async getApiKey(): Promise<string | undefined> {
@@ -118,6 +129,7 @@ export class Services implements vscode.Disposable {
 	}
 
 	private buildClient(apiKey: string, feature: Surface, baseUrl = this.baseUrl): GatewayClient {
+		const id = connectionId(apiKey, baseUrl);
 		return new GatewayClient({
 			baseUrl,
 			apiKey,
@@ -125,7 +137,11 @@ export class Services implements vscode.Disposable {
 			appUrl: 'https://github.com/upggr/openrouter-client',
 			feature,
 			idleTimeoutMs: this.config.get<number>('streamIdleTimeoutSeconds', 240) * 1000,
-			onUsage: usage => { if (usage.cost) { void this.recordCost(usage.cost); } },
+			onUsage: usage => {
+				if (!this.creditGuard.matches(id)) { return; }
+				this.scheduleCreditRefresh();
+				if (usage.cost && Number.isFinite(usage.cost) && usage.cost > 0) { void this.recordCost(usage.cost, id); }
+			},
 		});
 	}
 
@@ -264,14 +280,17 @@ export class Services implements vscode.Disposable {
 	/** OpenRouter reports real spend to the API key itself, so this needs no extra sign-in. */
 	async refreshLiveCredits(): Promise<void> {
 		const apiKey = await this.getApiKey();
-		if (!apiKey) {
-			this.liveLimit = undefined;
-			this.fire();
-			return;
-		}
+		if (!apiKey) { return; }
+		const baseUrl = this.baseUrl;
+		const id = connectionId(apiKey, baseUrl);
+		const generation = this.creditGuard.begin(id);
+		if (generation === undefined) { return; }
 		try {
-			this.liveLimit = await this.buildClient(apiKey, 'sidebar').getLiveLimit();
+			const limit = await this.buildClient(apiKey, 'sidebar', baseUrl).getLiveLimit();
+			if (!this.creditGuard.isCurrent(id, generation)) { return; }
+			this.liveLimit = limit;
 		} catch {
+			if (!this.creditGuard.isCurrent(id, generation)) { return; }
 			// A key that cannot read its own balance still works for chat, so fall back quietly.
 			this.liveLimit = undefined;
 		}
@@ -455,21 +474,52 @@ export class Services implements vscode.Disposable {
 		if (choice === refresh) { await this.refreshLiveCredits(); }
 	}
 
-	private async recordCost(cost: number): Promise<void> {
-		const before = this.credits.level;
-		await this.context.globalState.update(SPEND_STATE, addSpend(this.context.globalState.get<SpendRecord>(SPEND_STATE), cost, new Date(), this.activeKeyId));
-		this.fire();
-		const after = this.credits;
-		if (after.level !== before && after.level !== 'ok') {
-			const buy = 'Get More';
-			void vscode.window.showWarningMessage(`OpenRouter Client credits: ${after.label}. ${after.detail}`, buy)
-				.then(choice => { if (choice) { void this.openSubscriptionPage(); } });
+	private async recordCost(cost: number, id: string): Promise<void> {
+		const update = async () => {
+			if (!this.creditGuard.matches(id)) { return; }
+			const before = this.credits.level;
+			await this.context.globalState.update(SPEND_STATE, addSpend(this.context.globalState.get<SpendRecord>(SPEND_STATE), cost, new Date(), id));
+			if (!this.creditGuard.matches(id)) { return; }
+			this.fire();
+			const after = this.credits;
+			if (after.level !== before && after.level !== 'ok') {
+				const buy = 'Get More';
+				void vscode.window.showWarningMessage(`OpenRouter Client credits: ${after.label}. ${after.detail}`, buy)
+					.then(choice => { if (choice) { void this.openSubscriptionPage(); } });
+			}
+		};
+		this.spendUpdates = this.spendUpdates.then(update, update);
+		await this.spendUpdates;
+	}
+
+	private clearCreditTimers(): void {
+		for (const timer of this.creditRefreshTimers) { clearTimeout(timer); }
+		this.creditRefreshTimers = [];
+	}
+
+	/** Poll during a burst too, since the gateway can settle usage late. */
+	private scheduleCreditRefresh(): void {
+		if (this.creditRefreshTimers.length) { return; }
+		for (const delay of CREDIT_REFRESH_DELAYS_MS) {
+			const timer = setTimeout(() => {
+				this.creditRefreshTimers = this.creditRefreshTimers.filter(t => t !== timer);
+				void this.refreshLiveCredits();
+			}, delay);
+			this.creditRefreshTimers.push(timer);
 		}
 	}
 
 	private async keyChanged(): Promise<void> {
-		this.activeKey = await this.context.secrets.get(API_KEY_SECRET);
-		this.keyPresent = !!(await this.getApiKey());
+		this.clearCreditTimers();
+		const generation = this.creditGuard.reset();
+		this.creditConnection = undefined;
+		this.liveLimit = undefined;
+		this.fire();
+		const apiKey = await this.getApiKey();
+		if (!this.creditGuard.isCurrent(undefined, generation)) { return; }
+		this.keyPresent = !!apiKey;
+		this.creditConnection = apiKey ? connectionId(apiKey, this.baseUrl) : undefined;
+		this.creditGuard.reset(this.creditConnection);
 		this.cachedModels = undefined;
 		this.keyHealth = 'unknown';
 		this.modelsChanged.fire();
