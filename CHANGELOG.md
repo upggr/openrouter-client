@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.3
+
+- Register the chat participant as `@openrouter` again, so VS Code stops rejecting the invalid name and the handle matches the documentation.
+
 ## 0.1.2
 
 - Show the actual routed model(s) next to Auto as soon as OpenRouter identifies them, retaining the latest request's routing across UI refreshes.
