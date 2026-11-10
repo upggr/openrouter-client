@@ -1,14 +1,17 @@
 # Changelog
 
+## 0.1.5
+
+- `/handover` writes a short state document to `.openrouterclient/handover.md` so a human or another AI can continue the work, and `/resume` loads it back into a new chat. Credentials are stripped from it, and the folder is added to `.gitignore` because it lives in your repository.
+- `openrouter.monthlySpendLimit` now actually stops requests when it is reached, instead of only colouring the credit chip. An empty OpenRouter balance is refused up front too.
+- Plan mode no longer sends the edit and command tool schemas it would refuse, saving about 550 tokens of every plan-mode request.
+- `openrouter.maxTurns` now defaults to 50 rather than 200, so one message stuck in a loop cannot run up 200 paid requests. The agent still offers to continue.
+
 ## 0.1.4
 
 - Economy mode: a toggle next to the model name that runs conversation summaries, follow-up suggestions and read-only sub-agents on a cheaper model, while your replies and all file edits stay on the model you picked. The chip shows an estimate of what it saved, and claims nothing when the comparison cannot be priced.
 - Economy sub-agents are restricted to read-only tools, so a weaker model researches and reports instead of making edits that would have to be reviewed.
 - Prompt caching now also marks conversations for Gemini, not only Claude, so repeated context is billed at the lower cache-read rate.
-- `/handover` writes a short state document to `.openrouterclient/handover.md` so a human or another AI can continue the work, and `/resume` loads it back into a new chat. Credentials are stripped from it, and the folder is added to `.gitignore` because it lives in your repository.
-- `openrouter.monthlySpendLimit` now actually stops requests when it is reached, instead of only colouring the credit chip. An empty OpenRouter balance is refused up front too.
-- Plan mode no longer sends the edit and command tool schemas it would refuse, saving about 390 tokens of every plan-mode request.
-- `openrouter.maxTurns` now defaults to 50 rather than 200, so one message stuck in a loop cannot run up 200 paid requests. The agent still offers to continue.
 - Added `/economy [on|off]`, and `openrouter.economy`, `openrouter.economyModel` and `openrouter.economySubagents`.
 
 ## 0.1.3
