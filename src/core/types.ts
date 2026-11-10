@@ -32,6 +32,8 @@ export interface Usage {
 	cacheWriteTokens?: number;
 	/** The model that actually answered, which matters when routing with `auto`. */
 	model?: string;
+	/** The upstream provider that served the request, when OpenRouter reports it. */
+	provider?: string;
 }
 
 export interface ModelInfo {

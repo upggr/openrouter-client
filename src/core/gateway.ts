@@ -107,37 +107,53 @@ export class GatewayClient implements ChatStreamer {
 	 * Reads real spend from OpenRouter with the API key itself, so the credit figure
 	 * is authoritative rather than a local estimate.
 	 *
-	 * A key may carry its own spending cap, which matters more than the account balance,
-	 * so that is preferred when present and the account total is the fallback.
+	 * A key can carry a spending cap that is larger than the credits left on the account,
+	 * and either can stop a request first, so both are read and the smaller one wins.
 	 */
 	async getLiveLimit(signal?: AbortSignal): Promise<LiveLimit | undefined> {
-		const keyInfo = await this.readJson<{
-			data?: { label?: string; usage?: number; limit?: number | null; limit_remaining?: number | null; is_free_tier?: boolean };
-		}>('/v1/key', signal);
+		const [keyInfo, credits] = await Promise.all([
+			this.readJson<{
+				data?: {
+					usage?: number; limit?: number | null; limit_remaining?: number | null;
+					effective_budget?: { limit_usd?: number | null; spend_usd?: number | null; remaining_usd?: number | null; reset_interval?: string | null; resets_at?: string | null };
+				};
+			}>('/v1/key', signal),
+			this.readJson<{ data?: { total_credits?: number; total_usage?: number } }>('/v1/credits', signal),
+		]);
+		const candidates: LiveLimit[] = [];
 		const key = keyInfo?.data;
-		if (key && typeof key.limit === 'number') {
-			const used = key.usage ?? 0;
-			return {
-				limit: key.limit,
+		// effective_budget already accounts for organisation guardrails, so prefer it over the flat fields.
+		const budget = key?.effective_budget;
+		const keyLimit = budget?.limit_usd ?? key?.limit;
+		if (typeof keyLimit === 'number') {
+			const used = budget?.spend_usd ?? key?.usage ?? 0;
+			const remaining = budget?.remaining_usd ?? key?.limit_remaining ?? Math.max(keyLimit - used, 0);
+			candidates.push({
+				limit: keyLimit,
 				used,
-				remaining: key.limit_remaining ?? Math.max(key.limit - used, 0),
-				reached: (key.limit_remaining ?? key.limit - used) <= 0,
+				remaining: Math.max(remaining, 0),
+				reached: remaining <= 0,
 				scope: 'key',
 				currency: 'USD',
-			};
+				period: budget?.reset_interval ?? undefined,
+				resetsAt: budget?.resets_at ?? undefined,
+			});
 		}
-		const credits = await this.readJson<{ data?: { total_credits?: number; total_usage?: number } }>('/v1/credits', signal);
 		const total = credits?.data?.total_credits;
-		const used = credits?.data?.total_usage;
-		if (typeof total !== 'number' || typeof used !== 'number') { return undefined; }
-		return {
-			limit: total,
-			used,
-			remaining: Math.max(total - used, 0),
-			reached: total - used <= 0,
-			scope: 'account',
-			currency: 'USD',
-		};
+		const spent = credits?.data?.total_usage;
+		if (typeof total === 'number' && typeof spent === 'number') {
+			candidates.push({
+				limit: total,
+				used: spent,
+				remaining: Math.max(total - spent, 0),
+				reached: total - spent <= 0,
+				scope: 'account',
+				currency: 'USD',
+			});
+		}
+		if (!candidates.length) { return undefined; }
+		// Whichever has least left is the one that will actually stop the next request.
+		return candidates.reduce((a, b) => (b.remaining < a.remaining ? b : a));
 	}
 
 	/** GETs JSON with the API key, returning undefined when the endpoint is unavailable. */
@@ -258,7 +274,7 @@ export class GatewayClient implements ChatStreamer {
 				if (part.function?.arguments) { call.function.arguments += part.function.arguments; }
 			}
 			if (chunk.usage) {
-				const usage = toUsage(chunk.usage, chunk.model);
+				const usage = toUsage(chunk.usage, chunk.model, chunk.provider);
 				this.onUsage?.(usage);
 				yield { type: 'usage', usage };
 			}
@@ -345,6 +361,8 @@ function parseError(text: string): { code?: string; message: string } {
 
 interface GatewayChunk {
 	model?: string;
+	/** Which upstream served the request, which matters when routing with auto. */
+	provider?: string;
 	error?: { message?: string };
 	usage?: RawUsage;
 	choices?: {
@@ -367,7 +385,7 @@ interface RawUsage {
 	completion_tokens_details?: { reasoning_tokens?: number };
 }
 
-function toUsage(raw: RawUsage, model?: string): Usage {
+function toUsage(raw: RawUsage, model?: string, provider?: string): Usage {
 	return {
 		promptTokens: raw.prompt_tokens ?? 0,
 		completionTokens: raw.completion_tokens ?? 0,
@@ -376,6 +394,7 @@ function toUsage(raw: RawUsage, model?: string): Usage {
 		cacheWriteTokens: raw.prompt_tokens_details?.cache_write_tokens ?? raw.prompt_tokens_details?.cache_creation_tokens,
 		reasoningTokens: raw.completion_tokens_details?.reasoning_tokens,
 		model,
+		provider,
 	};
 }
 

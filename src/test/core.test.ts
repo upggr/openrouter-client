@@ -242,41 +242,68 @@ test('rich usage details are read from the stream', async () => {
 	}
 });
 
-test('reads the live balance with the API key, preferring a key limit', async () => {
+/** Serves OpenRouter's two balance endpoints. */
+function balanceGateway(key: object | null, credits: object | null) {
+	const seen: string[] = [];
+	handler = (req, res) => {
+		seen.push(req.url ?? '');
+		const body = req.url === '/v1/key' ? key : credits;
+		if (!body) { res.writeHead(404).end('{}'); return; }
+		res.end(JSON.stringify({ data: body }));
+	};
+	return seen;
+}
+
+test('reads the live balance with the API key', async () => {
 	let auth: string | undefined;
-	const paths: string[] = [];
 	handler = (req, res) => {
 		auth = req.headers.authorization;
-		paths.push(req.url ?? '');
-		if (req.url === '/v1/key') {
-			res.end(JSON.stringify({ data: { label: 'vs code', usage: 4, limit: 10, limit_remaining: 6 } }));
-			return;
-		}
-		res.end(JSON.stringify({ data: { total_credits: 100, total_usage: 1 } }));
+		const body = req.url === '/v1/key'
+			? { usage: 4, limit: 10, limit_remaining: 6 }
+			: { total_credits: 100, total_usage: 1 };
+		res.end(JSON.stringify({ data: body }));
 	};
 	const live = await client().getLiveLimit();
 	assert.equal(auth, `Bearer ${KEY}`);
-	assert.deepEqual(paths, ['/v1/key']);
 	assert.equal(live?.remaining, 6);
 	assert.equal(live?.scope, 'key');
 	assert.equal(creditStatus(undefined, 0, live).label, '$6.00 left');
 	assert.equal(creditStatus(undefined, 0, live).live, true);
 });
 
-test('falls back to the account balance when the key has no limit of its own', async () => {
-	const paths: string[] = [];
-	handler = (req, res) => {
-		paths.push(req.url ?? '');
-		if (req.url === '/v1/key') {
-			res.end(JSON.stringify({ data: { label: 'vs code', usage: 4, limit: null } }));
-			return;
-		}
-		res.end(JSON.stringify({ data: { total_credits: 25, total_usage: 10 } }));
-	};
+test('a key cap larger than the remaining credits does not overstate what is left', async () => {
+	// Seen live: a $10 key cap on an account with only $5.10 of credits left.
+	const seen = balanceGateway({ usage: 0, limit: 10, limit_remaining: 10 }, { total_credits: 80, total_usage: 74.9 });
 	const live = await client().getLiveLimit();
-	assert.deepEqual(paths, ['/v1/key', '/v1/credits']);
+	assert.deepEqual(seen.sort(), ['/v1/credits', '/v1/key']);
+	assert.equal(live?.scope, 'account');
+	assert.ok(Math.abs((live?.remaining ?? 0) - 5.1) < 1e-9);
+});
+
+test('prefers the effective budget, which includes organisation guardrails', async () => {
+	balanceGateway(
+		{ usage: 9, limit: 50, limit_remaining: 41, effective_budget: { limit_usd: 20, spend_usd: 9, remaining_usd: 11, reset_interval: 'monthly', resets_at: '2026-12-01T00:00:00Z' } },
+		{ total_credits: 500, total_usage: 9 },
+	);
+	const live = await client().getLiveLimit();
+	assert.equal(live?.scope, 'key');
+	assert.equal(live?.remaining, 11);
+	assert.equal(live?.period, 'monthly');
+	assert.equal(live?.resetsAt, '2026-12-01T00:00:00Z');
+});
+
+test('falls back to the account balance when the key has no limit of its own', async () => {
+	balanceGateway({ usage: 4, limit: null }, { total_credits: 25, total_usage: 10 });
+	const live = await client().getLiveLimit();
 	assert.equal(live?.remaining, 15);
 	assert.equal(live?.scope, 'account');
+});
+
+test('a key with a cap still reports when the balance endpoint is unavailable', async () => {
+	balanceGateway({ usage: 1, limit: 10, limit_remaining: 9 }, null);
+	const live = await client().getLiveLimit();
+	assert.equal(live?.scope, 'key');
+	assert.equal(live?.remaining, 9);
 });
 
 test('local credits reset each month and show what is left', () => {
