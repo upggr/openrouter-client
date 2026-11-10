@@ -27,6 +27,30 @@ export function currentMonth(now = new Date()): string {
 	return now.toISOString().slice(0, 7);
 }
 
+/** Local spend for this month on this key. An old month's or another key's total is not this key's spend. */
+export function spentThisMonth(record: SpendRecord | undefined, now = new Date(), keyId?: string): number {
+	return record?.month === currentMonth(now) && record.keyId === keyId ? record.total : 0;
+}
+
+/**
+ * Why the next request must not be sent, or undefined when it may go ahead.
+ * A budget that only colours a label is not a budget, so this is checked before
+ * every request and names the setting that lets the user carry on.
+ */
+export function budgetStop(record: SpendRecord | undefined, userLimit: number, live?: LiveLimit, now = new Date(), keyId?: string): string | undefined {
+	if (live && (live.reached || live.remaining <= 0)) {
+		const what = live.scope === 'key' ? "this key's limit" : 'your OpenRouter credits';
+		return `No credit left: ${money(live.used, live.currency)} of ${money(live.limit, live.currency)} used on ${what}. Add credits or switch to another key before sending more.`;
+	}
+	if (userLimit > 0) {
+		const spent = spentThisMonth(record, now, keyId);
+		if (spent >= userLimit) {
+			return `Your own monthly limit of ${money(userLimit)} is used up: about ${money(spent)} counted on this computer this month. Raise openrouter.monthlySpendLimit, or set it to 0 to turn your limit off. ${ESTIMATE_NOTE}`;
+		}
+	}
+	return undefined;
+}
+
 export function addSpend(record: SpendRecord | undefined, cost: number, now = new Date(), keyId?: string): SpendRecord {
 	const month = currentMonth(now);
 	const same = record?.month === month && record?.keyId === keyId;
@@ -72,7 +96,7 @@ function level(remaining: number, limit: number): CreditLevel {
 export function creditStatus(record: SpendRecord | undefined, userLimit: number, live?: LiveLimit, now = new Date(), keyId?: string): CreditStatus {
 	if (live) {
 		const reset = live.resetsAt ? ` Resets ${live.resetsAt.slice(0, 10)}.` : '';
-		const localSpend = record?.month === currentMonth(now) && record.keyId === keyId ? record.total : 0;
+		const localSpend = spentThisMonth(record, now, keyId);
 		const local = localSpend > 0 ? ` This month on this computer: ~${money(localSpend)} in reported request costs.` : '';
 		const what = live.scope === 'key' ? "this key's limit" : 'your OpenRouter credits';
 		return {
@@ -83,7 +107,7 @@ export function creditStatus(record: SpendRecord | undefined, userLimit: number,
 		};
 	}
 	// The local counter is per key and per month; an old key's or month's record is not this key's spend.
-	const spent = record?.month === currentMonth(now) && record.keyId === keyId ? record.total : 0;
+	const spent = spentThisMonth(record, now, keyId);
 	if (userLimit > 0) {
 		const remaining = Math.max(userLimit - spent, 0);
 		return {

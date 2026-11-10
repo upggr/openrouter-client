@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
-import { addSpend, BUY_URL, creditStatus, CreditRefreshGuard, CreditStatus, SpendRecord } from '../core/credits';
+import { addSpend, budgetStop, BUY_URL, creditStatus, CreditRefreshGuard, CreditStatus, SpendRecord } from '../core/credits';
 import { EconomyRouting, pickEconomyModel, sameModel, worthDelegating } from '../core/economy';
 import { DEFAULT_BASE_URL, GatewayClient, GatewayError, LiveLimit, normalizeBaseUrl } from '../core/gateway';
 import { defaultKeyLabel, KeyState, keyStates, maskKey, StoredKey } from '../core/keyring';
@@ -112,6 +112,21 @@ export class Services implements vscode.Disposable {
 
 	get credits(): CreditStatus {
 		return creditStatus(this.context.globalState.get<SpendRecord>(SPEND_STATE), this.config.get<number>('monthlySpendLimit', 0), this.liveLimit, new Date(), this.activeKeyId);
+	}
+
+	/**
+	 * Why the next request must not be sent, or undefined when it may go ahead.
+	 * Checked before sending, so a spent budget actually stops requests instead of
+	 * only colouring the credit chip after the money is gone.
+	 */
+	get budgetStop(): string | undefined {
+		return budgetStop(
+			this.context.globalState.get<SpendRecord>(SPEND_STATE),
+			this.config.get<number>('monthlySpendLimit', 0),
+			this.liveLimit,
+			new Date(),
+			this.activeKeyId,
+		);
 	}
 
 	/** Whether cheap-model delegation is on. Off by default, so cost behaviour never changes silently. */

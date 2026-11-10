@@ -8,7 +8,8 @@ import { after, before, test } from 'node:test';
 import { compact, runAgent, withCacheMarkers, AgentEvent, PermissionAnswer } from '../core/agent';
 import { buildAttachedContent, canReadImages, truncateAttachmentText } from '../core/attachments';
 import { compactLimit, compactionCut, DEFAULT_OUTPUT_TOKENS, estimateTokens, keepTokensFor, outputTokenLimit, flattenForSummary, looksLikeOverflow, trimForRequest } from '../core/context';
-import { addSpend, creditStatus, CreditRefreshGuard } from '../core/credits';
+import { addSpend, budgetStop, creditStatus, CreditRefreshGuard } from '../core/credits';
+import { buildHandoverRequest, handoverPath, ignoreHandoverFolder, readHandover, redactSecrets, writeHandover } from '../core/handover';
 import { addSaving, formatSavings, NO_SAVINGS, pickEconomyModel, sameModel, savingAgainst, worthDelegating } from '../core/economy';
 import { bestScore, blendedPrice, families, filterModels, formatContext, formatPrice, groupModels, isFree, priceVaries, sortModels } from '../core/modelPicker';
 import { Checkpoints } from '../core/checkpoints';
@@ -1401,6 +1402,121 @@ test('ranked sorts stay in one list while named sorts group by vendor', () => {
 	assert.deepEqual(groupModels(models, 'cheapest').map(g => g.label), ['']);
 	assert.deepEqual(groupModels(models, 'name').map(g => g.label), ['anthropic', 'openai']);
 	assert.deepEqual(families(models).map(f => `${f.id}:${f.count}`), ['anthropic:2', 'openai:1']);
+});
+
+test('a spent budget stops the next request instead of only colouring a label', () => {
+	const now = new Date('2026-11-10T12:00:00Z');
+	const record = { month: '2026-11', total: 5, keyId: 'k1' };
+	// Within budget, nothing blocks.
+	assert.equal(budgetStop(record, 10, undefined, now, 'k1'), undefined);
+	// At or past the user's own limit, sending is refused and the setting is named.
+	assert.match(budgetStop(record, 5, undefined, now, 'k1') ?? '', /monthly limit/);
+	assert.match(budgetStop(record, 5, undefined, now, 'k1') ?? '', /monthlySpendLimit/);
+	// No limit set means no local stop.
+	assert.equal(budgetStop(record, 0, undefined, now, 'k1'), undefined);
+	// Another key's or month's spend is not this key's.
+	assert.equal(budgetStop(record, 5, undefined, now, 'other'), undefined);
+	assert.equal(budgetStop({ ...record, month: '2026-10' }, 5, undefined, now, 'k1'), undefined);
+	// The real balance wins over any local tally.
+	const empty: LiveLimit = { used: 10, limit: 10, remaining: 0, reached: true, scope: 'key' };
+	assert.match(budgetStop(undefined, 0, empty, now, 'k1') ?? '', /No credit left/);
+	const fine: LiveLimit = { used: 1, limit: 10, remaining: 9, reached: false, scope: 'account' };
+	assert.equal(budgetStop(undefined, 0, fine, now, 'k1'), undefined);
+});
+
+test('plan mode does not pay for tools it will refuse', async () => {
+	const { root, clean } = workspace();
+	try {
+		const seen: string[][] = [];
+		const stream: ChatStreamer = {
+			async *streamChat(request) {
+				seen.push((request.tools ?? []).map(t => t.function.name));
+				yield say('here is the plan');
+			},
+		};
+		await runAgent({ ...agentOptions(stream, root, 'plan', 'deny', []), spawnDepth: 1 });
+		assert.deepEqual(seen[0], ['read_file', 'list_files', 'search_text'], 'only readable tools are offered');
+		// The same run in a mode that can edit still gets everything.
+		await runAgent({ ...agentOptions(stream, root, 'default', 'deny', []), spawnDepth: 1 });
+		assert.ok(seen[1].includes('write_file'));
+		assert.ok(seen[1].includes('run_command'));
+		assert.ok(seen[1].includes('spawn_agent'));
+	} finally { clean(); }
+});
+
+test('a handover document is written, kept out of git and stripped of secrets', async () => {
+	const { root, clean } = workspace();
+	try {
+		const body = [
+			'## Goal',
+			'Ship economy mode.',
+			'## Decisions',
+			'Used OPENROUTER_API_KEY=sk-or-v1-abcdefghijklmnop for testing.',
+			'Also sk-ant-api03-SECRETVALUE123456 and ghp_abcdefghijklmnopqrst.',
+		].join('\n');
+		const file = await writeHandover(root, { title: 'Economy mode', body, savedAt: new Date('2026-11-10T22:30:00Z') });
+		assert.equal(file, handoverPath(root));
+		const written = await readHandover(root);
+		assert.ok(written);
+		assert.match(written, /# Handover: Economy mode/);
+		assert.match(written, /2026-11-10 22:30 UTC/);
+		assert.match(written, /Ship economy mode/);
+		// A document written into the user's repository must not carry credentials,
+		// whatever the model was told to do.
+		assert.ok(!written.includes('sk-or-v1-abcdefghijklmnop'), 'gateway key redacted');
+		assert.ok(!written.includes('sk-ant-api03-SECRETVALUE123456'), 'other vendor key redacted');
+		assert.ok(!written.includes('ghp_abcdefghijklmnopqrst'), 'git token redacted');
+		assert.match(written, /\[redacted\]/);
+		// The folder is ignored by default, and saying so twice does not duplicate the line.
+		assert.equal(await ignoreHandoverFolder(root), true);
+		assert.equal(await ignoreHandoverFolder(root), false);
+		assert.match(fs.readFileSync(path.join(root, '.gitignore'), 'utf8'), /^\.openrouterclient\/$/m);
+	} finally { clean(); }
+});
+
+test('the handover request asks for portable state, not a transcript', () => {
+	const messages: ChatMessage[] = [
+		{ role: 'user', content: 'add economy mode' },
+		{ role: 'assistant', content: 'done in src/core/economy.ts' },
+		{ role: 'tool', tool_call_id: 't1', content: 'x'.repeat(5_000) },
+	];
+	const request = buildHandoverRequest(messages);
+	assert.equal(request.length, 1);
+	const text = String(request[0].content);
+	// It must ask for the things a fresh reader needs, and refuse file dumps.
+	for (const section of ['## Goal', '## State', '## Key files', '## Next step']) {
+		assert.ok(text.includes(section), `${section} requested`);
+	}
+	assert.match(text, /Do not copy file contents/);
+	assert.match(text, /Never include API keys/);
+	assert.ok(text.includes('add economy mode'));
+	// Tool output is already shortened by the flattener, so one huge result cannot dominate.
+	assert.ok(text.length < 10_000, 'the source conversation is condensed');
+});
+
+test('redaction catches credential shapes without mangling prose', () => {
+	for (const secret of [
+		'OPENROUTER_API_KEY=sk-or-v1-deadbeefcafebabe1234',
+		'export GITHUB_TOKEN=ghp_0123456789abcdefghij',
+		'"password": "hunter2"',
+		"api_key: 'abc123'",
+		'DB_PASSWORD = s3cr3t',
+		'AWS_SECRET_ACCESS_KEY=abc/def+123',
+		'slack xoxb-123456789012-abcdefghijkl',
+		'google AIzaSyA1234567890abcdefghijklmnopqrstu',
+	]) {
+		assert.ok(!redactSecrets(secret).includes(secret.split(/[:=]/).pop()!.trim()), `redacted: ${secret}`);
+	}
+	// A handover is mostly prose about tokens, keys and secrets, so it must not be shredded.
+	for (const clean of [
+		'Set the key in .env, then run npm test.',
+		'This costs 500 tokens: cheap.',
+		'Reduce prompt tokens: use caching.',
+		'The secret sauce: read the code first.',
+		'See src/core/economy.ts:42 for pricing.',
+	]) {
+		assert.equal(redactSecrets(clean), clean, `untouched: ${clean}`);
+	}
 });
 
 test('the economy model is the cheapest one that can actually do delegated work', () => {

@@ -139,8 +139,14 @@ export function withCacheMarkers(system: string, messages: ChatMessage[], model:
 export async function runAgent(options: AgentOptions): Promise<void> {
 	const { client, messages, signal, onEvent } = options;
 	const remembered = options.remembered ?? new Set<string>();
-	const tools = options.supportsTools === false ? undefined : toolSchemas(options.spawnDepth ?? 0, options.readOnlyTools === true);
-	const overhead = Math.ceil((options.systemPrompt.length + JSON.stringify(tools ?? []).length) / 4);
+	/**
+	 * Plan mode denies every edit and command, so sending those schemas pays for tools
+	 * that can only be refused, and invites the model to try them. The mode can change
+	 * between turns, so this is resolved per turn rather than once.
+	 */
+	const toolsFor = (mode: PermissionMode) => options.supportsTools === false
+		? undefined
+		: toolSchemas(options.spawnDepth ?? 0, options.readOnlyTools === true || mode === 'plan');
 	let contextWindow = options.contextWindow;
 	let calibration = 1;
 	let lastCompaction = -MIN_TURNS_BETWEEN_COMPACTIONS;
@@ -158,6 +164,8 @@ export async function runAgent(options: AgentOptions): Promise<void> {
 	};
 
 	for (let turn = 0; turn < options.maxTurns; turn++) {
+		const tools = toolsFor(options.getMode());
+		const overhead = Math.ceil((options.systemPrompt.length + JSON.stringify(tools ?? []).length) / 4);
 		let outgoing = trimForRequest(messages, contextWindow, calibration);
 		let estimate = estimateTokens(outgoing) + overhead;
 		if (contextWindow && estimate * calibration > compactLimit(contextWindow)

@@ -64,6 +64,19 @@ Each row shows the price per million tokens for input and output, the context wi
 - **priced per output** means an image or audio model that bills per image or per second rather than per token.
 - Tool support is required for the agent to edit files. Models without it are still fine for chat.
 
+## Handing work to another AI
+
+`/handover` asks the model to write a short state document to `.openrouterclient/handover.md`: the goal, what is done, the files that matter, decisions and their reasons, dead ends, and the single next step. `/resume` starts a fresh chat from that document.
+
+It is deliberately **not** a transcript. A saved session is tens of thousands of tokens of file contents and command output: expensive to resume from, and meaningless to a different tool. A page of prose is cheap to read and portable, so you can also just point Claude Code, Cursor or Copilot at the file, or commit it for a colleague.
+
+Two things to know:
+
+- **The folder is not secret.** It lives in your repository, so `/handover` adds `.openrouterclient/` to your `.gitignore` the first time. Delete that line if you would rather commit the handover and share it through git.
+- **Secrets are stripped.** The model is told never to include credentials, and anything that still looks like an API key, token or `SECRET=…` assignment is replaced with `[redacted]` before the file is written. Read it before you commit it anyway.
+
+Full chat history stays in VS Code's own per-workspace storage, as before. The handover is the part meant to leave the machine.
+
 ## Economy mode
 
 A long agent session spends credits on work that does not need your strongest model. The **Economy** toggle next to the model name moves that work to a cheap one:
@@ -78,11 +91,17 @@ The chip shows roughly what has been saved in this chat. It is an estimate: it c
 
 Economy mode delegates nothing when no model cheaper than your current one is available, so switching to a free model does not start pointless extra requests. Set `openrouter.economyModel` to choose the cheap model yourself, or turn off `openrouter.economySubagents` to keep sub-agents on your main model. `/economy on|off` works in the chat.
 
-Two other ways to spend less, both on by default: **prompt caching** marks the stable parts of a request so repeated context is billed at the much lower cache-read rate, and long chats are **summarized** rather than resent in full.
+Other ways the extension keeps the bill down, all on by default:
+
+- **Prompt caching** marks the stable parts of a request, so repeated context is billed at the much lower cache-read rate.
+- **Long chats are summarized** rather than resent in full.
+- **Plan mode only pays for the tools it can use.** Edit and command schemas are left out of requests that would refuse them anyway.
+- **`openrouter.maxTurns`** caps how many paid requests one message can turn into, so a model stuck in a loop cannot run up a bill. The default is 50; the agent asks you to send `continue` if it needs more.
+- **`openrouter.monthlySpendLimit`** refuses to send once your own budget for the month is gone, and says so rather than failing quietly. Your real OpenRouter balance stops requests too, so an empty account never silently retries.
 
 ## Credits
 
-The chip in the chat and the status bar show your real OpenRouter balance, read with your own key. If the key carries its own spending limit, that limit is shown instead of the account balance, because it is the one that will stop your requests. Set `openrouter.monthlySpendLimit` to track a budget of your own as well.
+The chip in the chat and the status bar show your real OpenRouter balance, read with your own key. If the key carries its own spending limit, that limit is shown instead of the account balance, because it is the one that will stop your requests. Set `openrouter.monthlySpendLimit` to cap your own monthly spend as well: once it is reached, OpenRouter Client refuses to send and tells you which setting to change.
 
 ## Configuration
 
@@ -93,7 +112,7 @@ See the settings under **OpenRouter Client** in VS Code settings, or `openrouter
 | `openrouter.baseUrl` | API URL, default `https://openrouter.ai/api` |
 | `openrouter.defaultModel` | Model used for new chats |
 | `openrouter.permissionMode` | `ask`, `acceptEdits`, `plan` or `bypass` |
-| `openrouter.maxTurns` | How many tool turns one request may take |
+| `openrouter.maxTurns` | How many paid turns one message may take, default 50 |
 | `openrouter.subagents` | Allow the agent to spawn sub-agents |
 | `openrouter.economy` | Start with economy mode on |
 | `openrouter.economyModel` | Model for delegated work, empty picks the cheapest capable one |

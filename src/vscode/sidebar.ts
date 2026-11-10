@@ -8,6 +8,7 @@ import { AgentEvent, compact, PermissionAnswer, PermissionRequest, runAgent } fr
 import { BUY_URL } from '../core/credits';
 import { addSaving, formatSavings, NO_SAVINGS, savingAgainst, SavingsTally } from '../core/economy';
 import { sessionToMarkdown } from '../core/exportChat';
+import { buildHandoverRequest, handoverPath, ignoreHandoverFolder, readHandover, writeHandover } from '../core/handover';
 import { GatewayClient, GatewayError } from '../core/gateway';
 import { addMemory, readMemory, removeMemory } from '../core/memory';
 import { isPermissionMode, PERMISSION_MODES } from '../core/permissions';
@@ -28,6 +29,8 @@ const HELP = [
 	'**Commands**',
 	'- `/new` start a new chat',
 	'- `/compact` summarize this chat to free context',
+	'- `/handover` write `.openrouterclient/handover.md` so a human or another AI can continue',
+	'- `/resume` load that handover back into a new chat',
 	'- `/model <id>` switch model',
 	'- `/mode <default|acceptEdits|plan|bypassPermissions>` switch permission mode',
 	'- `/credits` show spend and credits',
@@ -448,6 +451,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Text
 			this.post({ type: 'event', event: { type: 'error', message: 'Open a folder first so OpenRouter Client has a workspace to work in.' } });
 			return;
 		}
+		// Refuse before spending, not after: a budget that only reports is not a budget.
+		const stop = this.services.budgetStop;
+		if (stop) {
+			this.post({ type: 'event', event: { type: 'error', message: stop, showBuy: true } });
+			return;
+		}
 
 		const selection = includeSelection ? this.editorContext() : undefined;
 		this.lastSent = { text, includeSelection: includeSelection && !!selection, attachments };
@@ -726,9 +735,99 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Text
 			case '/compact':
 				await this.compactSession();
 				return true;
+			case '/handover':
+				await this.writeHandoverDocument();
+				return true;
+			case '/resume':
+				await this.resumeFromHandover();
+				return true;
 			default:
 				return false;
 		}
+	}
+
+	/**
+	 * Writes a short state document into the workspace so the work can be picked up
+	 * elsewhere. Economy mode writes it on the cheap model, since it is summarizing work.
+	 */
+	/** Writes the handover document, revealing the chat first so progress is visible. */
+	async writeHandover(): Promise<void> {
+		await this.reveal();
+		await this.writeHandoverDocument();
+	}
+
+	async resumeHandover(): Promise<void> {
+		await this.reveal();
+		await this.resumeFromHandover();
+	}
+
+	private async writeHandoverDocument(): Promise<void> {
+		const client = await this.services.client('sidebar');
+		const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+		if (!client || !root) { return; }
+		const messages = [...(this.session.archive ?? []), ...this.session.messages];
+		if (messages.length === 0) {
+			this.post({ type: 'event', event: { type: 'notice', message: 'This chat is empty, so there is nothing to hand over yet.' } });
+			return;
+		}
+		const abort = new AbortController();
+		this.abort = abort;
+		await this.postState();
+		try {
+			const model = this.services.model;
+			const economy = await this.services.economyRouting(model);
+			this.savingsBaseline ??= await this.services.modelInfo(model);
+			let body = '';
+			for await (const event of client.streamChat({ model: economy?.model ?? model, messages: buildHandoverRequest(messages), maxTokens: 4_000 }, abort.signal)) {
+				if (event.type === 'text') { body += event.text; }
+				else if (event.type === 'usage') {
+					if (economy) { this.recordEconomyUsage(event.usage); }
+					this.recordUsage(event.usage);
+				}
+			}
+			if (!body.trim()) {
+				this.post({ type: 'event', event: { type: 'error', message: 'The model returned an empty handover, so nothing was written. Try again.' } });
+				return;
+			}
+			const file = await writeHandover(root, { title: this.session.title, body, savedAt: new Date() });
+			// The folder sits inside the repository, so keep it out of commits unless the user decides otherwise.
+			const ignored = await ignoreHandoverFolder(root).catch(() => false);
+			const relative = vscode.workspace.asRelativePath(file);
+			this.post({
+				type: 'event',
+				event: {
+					type: 'notice',
+					message: `Wrote ${relative}. Point another AI at that file, or send /resume in a new chat to carry on here.${ignored ? ' Added .openrouterclient/ to .gitignore; remove that line if you want to commit it.' : ''}`,
+				},
+			});
+			await vscode.window.showTextDocument(vscode.Uri.file(file), { preview: true });
+		} catch (error) {
+			if (!abort.signal.aborted) { this.post({ type: 'event', event: { type: 'error', message: (error as Error).message } }); }
+		} finally {
+			this.abort = undefined;
+			await this.postState();
+		}
+	}
+
+	/** Starts a fresh chat seeded with the handover document, which is far cheaper than reloading a transcript. */
+	private async resumeFromHandover(): Promise<void> {
+		const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+		if (!root) { return; }
+		const document = await readHandover(root);
+		if (!document) {
+			this.post({ type: 'event', event: { type: 'notice', message: `No handover found at ${vscode.workspace.asRelativePath(handoverPath(root))}. Send /handover to write one first.` } });
+			return;
+		}
+		await this.startNew();
+		this.session.messages.push({
+			role: 'user',
+			content: `Continue this work. Here is the handover document from the previous session.\n\n<handover>\n${document}\n</handover>\n\nConfirm the state briefly, then carry on with the next step.`,
+		});
+		this.session.title = 'Resumed from handover';
+		await this.store.save(this.session).catch(() => undefined);
+		await this.postTranscript();
+		await this.postState();
+		this.post({ type: 'event', event: { type: 'notice', message: 'Loaded the handover document. Send a message to continue, or ask it to start on the next step.' } });
 	}
 
 	private async compactSession(): Promise<void> {

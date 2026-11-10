@@ -6,3 +6,5 @@ out/
 .vscode-test/
 *.vsix
 .DS_Store
+# Agent handover notes written into the workspace by /handover.
+.openrouterclient/

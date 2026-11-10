@@ -8,4 +8,6 @@ Issues and pull requests are welcome.
 
 `src/core` must stay free of `vscode` imports so it can be tested directly. VS Code integration belongs in `src/vscode`.
 
-Never commit API keys. For live tests, copy `.env.example` to `.env`, which git ignores.
+Every change ships as a version bump in `package.json` with a matching `## <version>` section in `CHANGELOG.md`. CI fails without both.
+
+Never commit API keys. For live tests, copy `.env.example` to `.env`, which git ignores. `.openrouterclient/` holds handover notes the agent writes into a workspace and is ignored too.

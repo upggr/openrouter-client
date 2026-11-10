@@ -54,6 +54,14 @@ async function handle(
 		return {};
 	}
 
+	// Refuse before spending, not after: a budget that only reports is not a budget.
+	const stop = services.budgetStop;
+	if (stop) {
+		stream.markdown(`${stop}\n\n`);
+		buyButtons(stream);
+		return {};
+	}
+
 	const override = request.command ? COMMAND_MODES[request.command] : undefined;
 	if (override && !await services.confirmBypass(override)) {
 		stream.markdown('Bypass was not enabled, so nothing ran.');

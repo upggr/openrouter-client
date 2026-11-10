@@ -26,6 +26,8 @@ export function activate(context: vscode.ExtensionContext): void {
 		vscode.commands.registerCommand('openrouter.showCredits', () => services.showCredits()),
 		vscode.commands.registerCommand('openrouter.openMemory', () => services.openMemory()),
 		vscode.commands.registerCommand('openrouter.exportChat', () => chatView.exportChat()),
+		vscode.commands.registerCommand('openrouter.writeHandover', () => chatView.writeHandover()),
+		vscode.commands.registerCommand('openrouter.resumeHandover', () => chatView.resumeHandover()),
 	);
 }
 
