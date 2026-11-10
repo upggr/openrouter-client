@@ -3,7 +3,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { PermissionMode } from './permissions';
 
-const INSTRUCTION_FILES = ['AGENTS.md', '8BOT.md'];
+const INSTRUCTION_FILES = ['AGENTS.md'];
 const MAX_INSTRUCTIONS = 20_000;
 
 export async function loadProjectInstructions(root: string): Promise<string> {

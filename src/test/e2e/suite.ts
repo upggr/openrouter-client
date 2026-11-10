@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import * as vscode from 'vscode';
 
 const EXTENSION_ID = 'IoannisKokkinis.openrouter-client';
-const CHEAP_MODEL = 'nova-micro-v1';
+const CHEAP_MODEL = 'meta-llama/llama-3.1-8b-instruct';
 
 async function step(name: string, body: () => Promise<void>): Promise<void> {
 	await body();
@@ -45,7 +45,7 @@ export async function run(): Promise<void> {
 	let models: vscode.LanguageModelChat[] = [];
 	await step('adds gateway models to the VS Code model picker', async () => {
 		for (let i = 0; i < 30 && models.length === 0; i++) {
-			models = await vscode.lm.selectChatModels({ vendor: 'eightos' });
+			models = await vscode.lm.selectChatModels({ vendor: 'openrouter' });
 			if (models.length === 0) { await new Promise(resolve => setTimeout(resolve, 1000)); }
 		}
 		assert.ok(models.length > 5, `only ${models.length} models`);

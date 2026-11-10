@@ -23,14 +23,14 @@ const BODY = `
 </main>`;
 
 const STATE = {
-	type: 'state', hasKey: true, buyUrl: 'x', gateway: 'https://api.8os.com',
+	type: 'state', hasKey: true, buyUrl: 'x', gateway: 'https://openrouter.ai/api',
 	models: [{ id: 'a', name: 'A', efforts: ['low', 'high'], contextWindow: 100 }, { id: 'b', name: 'B', efforts: [], contextWindow: 100 }],
 	model: 'a', mode: 'default', effort: 'high',
 	modes: [{ id: 'default', label: 'Ask first', detail: '' }, { id: 'bypassPermissions', label: 'Bypass', detail: '' }],
 	keyStatus: 'ok',
 	keys: [
-		{ id: 'k1', label: 'Work', masked: 'sk-pax8-…aaaa', gateway: 'https://api.8os.com', active: true },
-		{ id: 'k2', label: 'sk-pax8-…bbbb', masked: 'sk-pax8-…bbbb', gateway: 'https://other.example', active: false },
+		{ id: 'k1', label: 'Work', masked: 'sk-or-v1-…aaaa', gateway: 'https://openrouter.ai/api', active: true },
+		{ id: 'k2', label: 'sk-or-v1-…bbbb', masked: 'sk-or-v1-…bbbb', gateway: 'https://other.example', active: false },
 	],
 	sessions: [], sessionId: 's1', busy: false, credits: { label: '$1.00 left', detail: 'd', level: 'low', live: false }, promptTokens: 50,
 };
@@ -71,11 +71,11 @@ test('a user with no key sees the welcome screen and can reach the subscription 
 	assert.equal($('app').hidden, true);
 	$('getSubscription').click();
 	assert.equal(posted.at(-1)?.type, 'buy');
-	assert.equal($('gateway').value, 'https://api.8os.com');
-	$('apiKey').value = 'sk-pax8-abc';
+	assert.equal($('gateway').value, 'https://openrouter.ai/api');
+	$('apiKey').value = 'sk-or-v1-abc';
 	$('keyLabel').value = 'Work';
 	$('saveConnection').click();
-	assert.deepEqual(posted.at(-1), { type: 'saveConnection', gateway: 'https://api.8os.com', key: 'sk-pax8-abc', label: 'Work' });
+	assert.deepEqual(posted.at(-1), { type: 'saveConnection', gateway: 'https://openrouter.ai/api', key: 'sk-or-v1-abc', label: 'Work' });
 	send({ type: 'setupResult', error: 'rejected' });
 	assert.equal($('setupError').textContent, 'rejected');
 	assert.equal($('setupError').hidden, false);
@@ -202,7 +202,7 @@ test('the key picker shows the active key and switches, forgets and adds keys', 
 	const { dom, posted, send, $, win } = load();
 	send(STATE);
 	assert.equal($('keyButton').className, 'ok');
-	assert.equal($('keyButton').title, 'API key working: Work · sk-pax8-…aaaa');
+	assert.equal($('keyButton').title, 'API key working: Work · sk-or-v1-…aaaa');
 	assert.equal($('keyMenu').hidden, true);
 	$('keyButton').click();
 	assert.equal($('keyMenu').hidden, false);
@@ -229,15 +229,15 @@ test('the key picker shows the active key and switches, forgets and adds keys', 
 	$('keyButton').click();
 	$('addKey').click();
 	assert.equal($('keyForm').hidden, false);
-	assert.equal($('newKeyGateway').value, 'https://api.8os.com');
-	$('newKey').value = ' sk-pax8-new ';
+	assert.equal($('newKeyGateway').value, 'https://openrouter.ai/api');
+	$('newKey').value = ' sk-or-v1-new ';
 	$('newKeyName').value = 'Home';
 	$('saveKey').click();
-	assert.deepEqual(posted.at(-1), { type: 'addKey', gateway: 'https://api.8os.com', key: 'sk-pax8-new', label: 'Home' });
+	assert.deepEqual(posted.at(-1), { type: 'addKey', gateway: 'https://openrouter.ai/api', key: 'sk-or-v1-new', label: 'Home' });
 	send({ type: 'keyResult', error: 'rejected' });
 	assert.equal($('keyError').textContent, 'rejected');
 	assert.equal($('keyMenu').hidden, false);
-	assert.equal($('newKey').value, ' sk-pax8-new ', 'a failed save keeps what was typed');
+	assert.equal($('newKey').value, ' sk-or-v1-new ', 'a failed save keeps what was typed');
 	send({ type: 'keyResult' });
 	assert.equal($('keyMenu').hidden, true);
 	assert.equal($('newKey').value, '', 'a saved key does not linger in the page');

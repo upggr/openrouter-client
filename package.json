@@ -1,7 +1,7 @@
 {
 	"name": "openrouter-client",
 	"displayName": "OpenRouter Client: AI Chat and Coding Agent",
-	"description": "AI coding agent and chat for VS Code using your OpenRouter API key: sidebar chat, @openrouter in VS Code Chat, 300+ models, file edits, terminal commands and permission modes.",
+	"description": "AI coding agent and chat for VS Code using your OpenRouter API key: sidebar chat, @openrouter in VS Code Chat, hundreds of models, file edits, terminal commands and permission modes.",
 	"version": "0.1.0",
 	"publisher": "IoannisKokkinis",
 	"author": {
@@ -104,7 +104,7 @@
 		],
 		"languageModelChatProviders": [
 			{
-				"vendor": "eightos",
+				"vendor": "openrouter",
 				"displayName": "OpenRouter"
 			}
 		],

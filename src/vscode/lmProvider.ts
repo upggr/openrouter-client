@@ -3,7 +3,7 @@ import { outputTokenLimit } from '../core/context';
 import { ChatMessage, ContentPart, ToolCall, ToolSchema } from '../core/types';
 import { Services } from './services';
 
-export const VENDOR = 'eightos';
+export const VENDOR = 'openrouter';
 
 /** Adds gateway models to the VS Code Chat model picker, including built-in Agent mode. */
 export class GatewayModelProvider implements vscode.LanguageModelChatProvider {

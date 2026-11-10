@@ -1,10 +1,10 @@
 # Security
 
-Report vulnerabilities privately through [GitHub security advisories](https://github.com/upggr/8bot-vscode/security/advisories/new), not in a public issue.
+Report vulnerabilities privately through [GitHub security advisories](https://github.com/upggr/openrouter-client/security/advisories/new), not in a public issue.
 
-## How 8bot protects you
+## How OpenRouter Client protects you
 
-- API keys and Pax8 tokens are kept in VS Code secret storage and are removed from the environment of agent commands.
+- API keys are kept in VS Code secret storage and are removed from the environment of agent commands.
 - The gateway URL and permission mode are user-level settings, so a repository cannot redirect your key or enable Bypass.
 - The extension does not run in untrusted workspaces.
 - Outside Bypass mode, file tools stay inside the workspace, including through symlinks.
