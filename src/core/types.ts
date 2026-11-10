@@ -55,6 +55,12 @@ export interface ModelInfo {
 	promptPricePerMillion?: number;
 	/** USD per million completion tokens, when OpenRouter publishes a price. */
 	completionPricePerMillion?: number;
+	/** Artificial Analysis intelligence index, when published. Higher is stronger. */
+	intelligence?: number;
+	/** Artificial Analysis coding index, when published. */
+	codingScore?: number;
+	/** Artificial Analysis agentic index, when published. */
+	agenticScore?: number;
 }
 
 export type StreamEvent =

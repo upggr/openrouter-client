@@ -22,7 +22,7 @@ It works in its own sidebar, as **`@openrouter` in the VS Code Chat window**, an
 - **`@openrouter` in VS Code Chat**, with `/plan`, `/edit`, `/bypass` and `/models`.
 - **OpenRouter models in the VS Code model picker**, usable by VS Code's built-in Agent mode.
 - **Coding agent tools:** read, list and search files, create and edit files, and run terminal commands.
-- **The whole catalogue**, grouped by vendor, with each model's published price per million tokens.
+- **A picker built for a big catalogue.** Sort by recommended, cheapest, strongest, largest context or name, and filter to tool-capable, free, vision or a single vendor. Every row shows price, context, capabilities and benchmark score.
 - **Real spend, not an estimate.** OpenRouter reports your balance to your API key, so the credit figure is authoritative. A key with its own spending cap shows that cap.
 - **`openrouter/auto` routing** that picks a model for each request, with automatic failover when a provider rejects it.
 - **Sub-agents** for focused subtasks, each with its own context.
@@ -42,11 +42,26 @@ It works in its own sidebar, as **`@openrouter` in the VS Code Chat window**, an
 
 ## Choosing a model
 
-OpenRouter publishes prices with its catalogue, so the model picker shows what each one costs per million tokens. A few starting points:
+There are several hundred models, so the picker opens on a **Recommended** order: models with the best published benchmark scores that can also call tools, with duplicates and deprecated models pushed down. The two controls at the top change what you see.
 
-- **`openrouter/auto`** — let OpenRouter choose per request.
-- Models priced at **$0** are free to use, with lower rate limits.
-- Tool use is required for the agent to edit files; models without it are still fine for chat.
+**Sort by**
+
+| Sort | Use it when |
+| --- | --- |
+| Recommended | You just want a good default, grouped by vendor |
+| Cheapest first | Cost matters most. Free models come first |
+| Strongest first | You want the highest published score, cost aside |
+| Largest context | You are working with very large files |
+| Name | You know what you are looking for |
+
+**Filter by** tool support, free only, vision, or a single vendor. Filters stack, and the title shows how many models match.
+
+Each row shows the price per million tokens for input and output, the context window, whether it supports tools, vision and reasoning, and its benchmark score where one is published. Notes on pricing:
+
+- **free** costs nothing, with lower rate limits.
+- **price varies** means a router such as `openrouter/auto` picks the model, so the cost depends on where the request lands.
+- **priced per output** means an image or audio model that bills per image or per second rather than per token.
+- Tool support is required for the agent to edit files. Models without it are still fine for chat.
 
 ## Credits
 

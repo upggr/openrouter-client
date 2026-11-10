@@ -5,6 +5,7 @@ import { addSpend, BUY_URL, creditStatus, CreditStatus, SpendRecord } from '../c
 import { DEFAULT_BASE_URL, GatewayClient, GatewayError, LiveLimit, normalizeBaseUrl } from '../core/gateway';
 import { defaultKeyLabel, KeyState, keyStates, maskKey, StoredKey } from '../core/keyring';
 import { addMemory, readMemory } from '../core/memory';
+import { bestScore, families, filterModels, formatContext, formatPrice, groupModels, isFree, ModelFilter, ModelSort, SORT_OPTIONS, sortModels } from '../core/modelPicker';
 import { PERMISSION_MODES, PermissionMode, restorePermissionMode } from '../core/permissions';
 import { ModelInfo } from '../core/types';
 
@@ -15,6 +16,8 @@ const MODEL_STATE = 'openrouter.model';
 const MODE_STATE = 'openrouter.permissionMode';
 const SPEND_STATE = 'openrouter.spend';
 const BYPASS_ACK_STATE = 'openrouter.bypassAcknowledged';
+/** Remembers the picker's sort between sessions. */
+const MODEL_SORT_STATE = 'openrouter.modelSort';
 
 export type Surface = 'sidebar' | 'chat-participant' | 'model-provider';
 
@@ -309,20 +312,104 @@ export class Services implements vscode.Disposable {
 		this.fire();
 	}
 
+	/**
+	 * The catalogue runs to hundreds of models, so the picker opens on a recommended
+	 * order and carries its own sort and filter controls rather than one flat list.
+	 */
 	async pickModel(): Promise<void> {
 		if (!await this.client('sidebar')) { return; }
 		const models = await this.models(true);
-		const picked = await vscode.window.showQuickPick(
-			models.map(m => ({
-				label: `${m.id === this.model ? '$(check)' : m.deprecatedAt ? '$(warning)' : '$(sparkle)'} ${m.name}`,
-				description: `${m.id}${m.id === this.model ? ' · current' : ''}${m.deprecatedAt ? ' · deprecated' : ''}`,
-				detail: [m.contextWindow ? `${m.contextWindow.toLocaleString()} context tokens` : '', m.supportsTools ? 'Tools' : '', m.reasoningEfforts.length ? 'Reasoning' : '', m.description].filter(Boolean).join(' · '),
-				picked: m.id === this.model,
-				id: m.id,
-			})),
-			{ title: 'OpenRouter Client · Select Model', placeHolder: 'Search models by name, ID or capabilities…', matchOnDescription: true, matchOnDetail: true },
+		let sort = this.context.globalState.get<ModelSort>(MODEL_SORT_STATE, 'recommended');
+		let filter: ModelFilter = {};
+
+		for (;;) {
+			const shown = sortModels(filterModels(models, filter), sort);
+			const sortLabel = SORT_OPTIONS.find(o => o.id === sort)?.label ?? 'Recommended';
+			const active = [
+				filter.toolsOnly ? 'tools' : '',
+				filter.freeOnly ? 'free' : '',
+				filter.visionOnly ? 'vision' : '',
+				filter.family ?? '',
+			].filter(Boolean).join(', ');
+
+			type Item = vscode.QuickPickItem & { id?: string; action?: 'sort' | 'filter' };
+			const items: Item[] = [
+				{ label: `$(sort-precedence) Sort: ${sortLabel}`, description: 'Change how models are ordered', action: 'sort', alwaysShow: true },
+				{ label: `$(filter) Filter${active ? `: ${active}` : ''}`, description: active ? 'Change or clear filters' : 'Tools, free, vision or vendor', action: 'filter', alwaysShow: true },
+			];
+			for (const group of groupModels(shown, sort)) {
+				if (group.label) { items.push({ label: group.label, kind: vscode.QuickPickItemKind.Separator }); }
+				for (const m of group.models) { items.push(this.modelItem(m)); }
+			}
+
+			const picked = await vscode.window.showQuickPick(items, {
+				title: `Select Model · ${shown.length} of ${models.length}`,
+				placeHolder: 'Search by name, vendor, price or capability…',
+				matchOnDescription: true,
+				matchOnDetail: true,
+			});
+			if (!picked) { return; }
+			if (picked.action === 'sort') {
+				const choice = await vscode.window.showQuickPick(
+					SORT_OPTIONS.map(o => ({ label: o.label, detail: o.detail, id: o.id, picked: o.id === sort })),
+					{ title: 'Sort Models By' },
+				);
+				if (choice) {
+					sort = choice.id;
+					await this.context.globalState.update(MODEL_SORT_STATE, sort);
+				}
+				continue;
+			}
+			if (picked.action === 'filter') {
+				filter = await this.pickModelFilter(models, filter);
+				continue;
+			}
+			if (picked.id) { await this.setModel(picked.id); return; }
+		}
+	}
+
+	private modelItem(m: ModelInfo): vscode.QuickPickItem & { id: string } {
+		const icon = m.id === this.model ? '$(check)' : m.deprecatedAt ? '$(warning)' : isFree(m) ? '$(gift)' : '$(sparkle)';
+		const score = bestScore(m);
+		return {
+			label: `${icon} ${m.name}`,
+			description: [m.id, m.id === this.model ? 'current' : '', m.deprecatedAt ? 'deprecated' : ''].filter(Boolean).join(' · '),
+			detail: [
+				formatPrice(m),
+				formatContext(m),
+				m.supportsTools ? 'tools' : 'no tools',
+				m.supportsImages ? 'vision' : '',
+				m.reasoningEfforts.length ? 'reasoning' : '',
+				score !== undefined ? `score ${Math.round(score)}` : '',
+			].filter(Boolean).join(' · '),
+			id: m.id,
+		};
+	}
+
+	private async pickModelFilter(models: ModelInfo[], current: ModelFilter): Promise<ModelFilter> {
+		const CLEAR = 'clear';
+		const choice = await vscode.window.showQuickPick(
+			[
+				{ label: '$(tools) Tools only', detail: 'Models the agent can use to edit files', id: 'tools', picked: !!current.toolsOnly },
+				{ label: '$(gift) Free only', detail: 'Models that cost nothing to run', id: 'free', picked: !!current.freeOnly },
+				{ label: '$(device-camera) Vision only', detail: 'Models that accept images', id: 'vision', picked: !!current.visionOnly },
+				{ label: '$(organization) Choose a vendor…', detail: 'Anthropic, OpenAI, Google and others', id: 'family' },
+				{ label: '$(clear-all) Clear filters', id: CLEAR },
+			],
+			{ title: 'Filter Models', placeHolder: 'Filters apply on top of each other' },
 		);
-		if (picked) { await this.setModel(picked.id); }
+		if (!choice) { return current; }
+		if (choice.id === CLEAR) { return {}; }
+		if (choice.id === 'family') {
+			const vendor = await vscode.window.showQuickPick(
+				families(models).map(f => ({ label: f.id, description: `${f.count} model${f.count === 1 ? '' : 's'}`, id: f.id })),
+				{ title: 'Vendor', placeHolder: 'Search vendors…' },
+			);
+			return vendor ? { ...current, family: current.family === vendor.id ? undefined : vendor.id } : current;
+		}
+		if (choice.id === 'tools') { return { ...current, toolsOnly: !current.toolsOnly }; }
+		if (choice.id === 'free') { return { ...current, freeOnly: !current.freeOnly }; }
+		return { ...current, visionOnly: !current.visionOnly };
 	}
 
 	/** Switches mode, showing the warning the first time bypass is turned on. Returns false if declined. */

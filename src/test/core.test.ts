@@ -9,6 +9,7 @@ import { compact, runAgent, withCacheMarkers, AgentEvent, PermissionAnswer } fro
 import { buildAttachedContent, canReadImages, truncateAttachmentText } from '../core/attachments';
 import { compactLimit, compactionCut, DEFAULT_OUTPUT_TOKENS, estimateTokens, keepTokensFor, outputTokenLimit, flattenForSummary, looksLikeOverflow, trimForRequest } from '../core/context';
 import { addSpend, creditStatus } from '../core/credits';
+import { bestScore, blendedPrice, families, filterModels, formatContext, formatPrice, groupModels, isFree, priceVaries, sortModels } from '../core/modelPicker';
 import { Checkpoints } from '../core/checkpoints';
 import { LiveLimit } from '../core/gateway';
 import { sessionToMarkdown } from '../core/exportChat';
@@ -18,7 +19,7 @@ import { decide, PermissionMode, rememberKey, restorePermissionMode } from '../c
 import { buildSystemPrompt } from '../core/prompt';
 import { newSession, SessionStore } from '../core/sessions';
 import { findTool, globToRegExp, isSensitivePath, ToolContext } from '../core/tools';
-import { ChatMessage, ChatStreamer, ContentPart, StreamEvent, ToolCall } from '../core/types';
+import { ChatMessage, ChatStreamer, ContentPart, ModelInfo, StreamEvent, ToolCall } from '../core/types';
 import { defaultKeyLabel, keyStates, maskKey } from '../core/keyring';
 import { byteSize, fitRequestSize, MAX_REQUEST_BYTES } from '../core/requestSize';
 
@@ -1039,4 +1040,106 @@ test('sessions persist and reject unsafe ids', async () => {
 		assert.equal((await store.load(session.id))?.title, 'Hello');
 		await assert.rejects(store.delete('../../etc/passwd'), /Invalid/);
 	} finally { clean(); }
+});
+
+function model(id: string, extra: Partial<ModelInfo> = {}): ModelInfo {
+	return {
+		id,
+		name: id,
+		family: id.includes('/') ? id.split('/')[0] : id,
+		contextWindow: 128_000,
+		maxOutputTokens: 8_192,
+		supportsTools: true,
+		supportsImages: false,
+		reasoningEfforts: [],
+		inputModalities: ['TEXT'],
+		outputModalities: ['TEXT'],
+		...extra,
+	};
+}
+
+test('prices are blended so input-heavy chat ranks realistically', () => {
+	// Cheap input with costly output must not look cheaper than a flat mid-price model.
+	const spiky = model('a/spiky', { promptPricePerMillion: 0.1, completionPricePerMillion: 40 });
+	const flat = model('a/flat', { promptPricePerMillion: 3, completionPricePerMillion: 3 });
+	assert.ok(blendedPrice(spiky)! > blendedPrice(flat)!);
+	assert.equal(blendedPrice(flat), 3);
+	assert.equal(isFree(model('a/free', { promptPricePerMillion: 0, completionPricePerMillion: 0 })), true);
+	// Routers publish no fixed price, which is not the same as being free.
+	assert.equal(priceVaries(model('openrouter/auto')), true);
+	assert.equal(isFree(model('openrouter/auto')), false);
+});
+
+test('cheapest sorts free first and parks models with no fixed price last', () => {
+	const models = [
+		model('a/mid', { promptPricePerMillion: 3, completionPricePerMillion: 3 }),
+		model('openrouter/auto'),
+		model('a/free', { promptPricePerMillion: 0, completionPricePerMillion: 0 }),
+		model('a/cheap', { promptPricePerMillion: 0.02, completionPricePerMillion: 0.02 }),
+	];
+	assert.deepEqual(sortModels(models, 'cheapest').map(m => m.id), ['a/free', 'a/cheap', 'a/mid', 'openrouter/auto']);
+});
+
+test('recommended puts capable models first and demotes tool-less and billing variants', () => {
+	const models = [
+		model('a/no-tools', { supportsTools: false, intelligence: 60 }),
+		model('a/strong', { intelligence: 50, agenticScore: 55 }),
+		model('a/strong:batch', { intelligence: 50, agenticScore: 55 }),
+		model('a/weak', { intelligence: 10 }),
+		model('a/old', { intelligence: 58, deprecatedAt: '2026-01-01' }),
+	];
+	const order = sortModels(models, 'recommended').map(m => m.id);
+	assert.equal(order[0], 'a/strong');
+	// The duplicate billing variant must rank below the plain model.
+	assert.ok(order.indexOf('a/strong') < order.indexOf('a/strong:batch'));
+	// Tool-less and deprecated models are never a good default for an agent.
+	assert.ok(order.indexOf('a/no-tools') > order.indexOf('a/weak'));
+	assert.equal(order.at(-1), 'a/no-tools');
+});
+
+test('strongest sort prefers agentic and coding scores over raw intelligence', () => {
+	const a = model('a/one', { intelligence: 70 });
+	const b = model('a/two', { intelligence: 40, codingScore: 80 });
+	const c = model('a/three', { intelligence: 40, codingScore: 60, agenticScore: 90 });
+	assert.equal(bestScore(c), 90);
+	assert.equal(bestScore(b), 80);
+	assert.deepEqual(sortModels([a, b, c], 'smartest').map(m => m.id), ['a/three', 'a/two', 'a/one']);
+	// A billing variant scores the same as its base model and must not jump ahead of it.
+	assert.deepEqual(sortModels([model('a/one:batch', { intelligence: 70 }), a], 'smartest').map(m => m.id), ['a/one', 'a/one:batch']);
+	// Unscored models fall to the end rather than being treated as zero-strength ties.
+	assert.equal(sortModels([model('a/none'), a], 'smartest')[0].id, 'a/one');
+});
+
+test('filters combine and can be cleared', () => {
+	const models = [
+		model('a/plain'),
+		model('a/vision', { supportsImages: true }),
+		model('b/free-vision', { supportsImages: true, promptPricePerMillion: 0, completionPricePerMillion: 0 }),
+		model('b/chat-only', { supportsTools: false }),
+	];
+	assert.deepEqual(filterModels(models, { toolsOnly: true }).map(m => m.id), ['a/plain', 'a/vision', 'b/free-vision']);
+	assert.deepEqual(filterModels(models, { visionOnly: true, freeOnly: true }).map(m => m.id), ['b/free-vision']);
+	assert.deepEqual(filterModels(models, { family: 'b' }).map(m => m.id), ['b/free-vision', 'b/chat-only']);
+	assert.deepEqual(filterModels(models, {}).length, 4);
+});
+
+test('ranked sorts stay in one list while named sorts group by vendor', () => {
+	const models = [model('anthropic/x'), model('openai/y'), model('anthropic/z')];
+	assert.deepEqual(groupModels(models, 'cheapest').map(g => g.label), ['']);
+	assert.deepEqual(groupModels(models, 'name').map(g => g.label), ['anthropic', 'openai']);
+	assert.deepEqual(families(models).map(f => `${f.id}:${f.count}`), ['anthropic:2', 'openai:1']);
+});
+
+test('prices and context windows read clearly', () => {
+	assert.equal(formatPrice(model('a/b', { promptPricePerMillion: 0, completionPricePerMillion: 0 })), 'free');
+	assert.equal(formatPrice(model('openrouter/auto')), 'price varies');
+	// Image and audio models publish zero per-token prices but bill per output.
+	const painter = model('g/painter', { promptPricePerMillion: 0, completionPricePerMillion: 0, outputModalities: ['IMAGE', 'TEXT'] });
+	assert.equal(formatPrice(painter), 'priced per output');
+	assert.equal(isFree(painter), false);
+	assert.equal(sortModels([painter, model('a/free', { promptPricePerMillion: 0, completionPricePerMillion: 0 })], 'cheapest')[0].id, 'a/free');
+	assert.equal(formatPrice(model('a/b', { promptPricePerMillion: 0.006, completionPricePerMillion: 0.024 })), '$0.006/$0.024 per M');
+	assert.equal(formatPrice(model('a/b', { promptPricePerMillion: 3, completionPricePerMillion: 15 })), '$3/$15 per M');
+	assert.equal(formatContext(model('a/b', { contextWindow: 1_000_000 })), '1M context');
+	assert.equal(formatContext(model('a/b', { contextWindow: 200_000 })), '200K context');
 });

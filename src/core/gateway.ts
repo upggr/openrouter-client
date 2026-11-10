@@ -457,6 +457,11 @@ function perMillion(price: string | undefined): number | undefined {
 	return value * 1_000_000;
 }
 
+/** Benchmark indexes arrive as null when a model has not been scored. */
+function score(value: number | null | undefined): number | undefined {
+	return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
 /** Modalities arrive lowercase ("text", "image"); the rest of the app expects upper case. */
 function modalities(list: string[] | undefined, fallback: string[]): string[] {
 	const mapped = list?.map(m => m.toUpperCase()).filter(Boolean);
@@ -472,9 +477,11 @@ function toModelInfo(raw: unknown): ModelInfo | undefined {
 		pricing?: { prompt?: string; completion?: string };
 		supported_parameters?: string[];
 		expiration_date?: string | null;
+		benchmarks?: { artificial_analysis?: { intelligence_index?: number | null; coding_index?: number | null; agentic_index?: number | null } | null } | null;
 	};
 	if (!m.id) { return undefined; }
 	const params = m.supported_parameters ?? [];
+	const aa = m.benchmarks?.artificial_analysis;
 	const input = modalities(m.architecture?.input_modalities, ['TEXT']);
 	const output = modalities(m.architecture?.output_modalities, ['TEXT']);
 	// Only chat-style text output is usable here; image or audio generators are not.
@@ -496,5 +503,8 @@ function toModelInfo(raw: unknown): ModelInfo | undefined {
 		outputModalities: output,
 		promptPricePerMillion: perMillion(m.pricing?.prompt),
 		completionPricePerMillion: perMillion(m.pricing?.completion),
+		intelligence: score(aa?.intelligence_index),
+		codingScore: score(aa?.coding_index),
+		agenticScore: score(aa?.agentic_index),
 	};
 }
