@@ -1,0 +1,9 @@
+**
+!package.json
+!README.md
+!CHANGELOG.md
+!LICENSE
+!media/**
+!out/extension.js
+!out/core/**/*.js
+!out/vscode/**/*.js

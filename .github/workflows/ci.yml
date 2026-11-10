@@ -1,0 +1,36 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm test
+      - run: npx vsce package
+      # Every change must ship as a version bump with a CHANGELOG section to match.
+      - name: Check version and changelog
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          if ! grep -q "^## $VERSION\$" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no '## $VERSION' section. Add one before merging."
+            exit 1
+          fi
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            git fetch origin main --depth=1
+            BASE_VERSION=$(git show origin/main:package.json | node -p "JSON.parse(require('fs').readFileSync(0)).version")
+            if [ "$VERSION" = "$BASE_VERSION" ] && ! git diff --quiet origin/main...HEAD -- package.json CHANGELOG.md src media docs 2>/dev/null; then
+              echo "::error::package.json version is still $VERSION. Bump it and add a CHANGELOG section."
+              exit 1
+            fi
+          fi

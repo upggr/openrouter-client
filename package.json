@@ -1,0 +1,353 @@
+{
+	"name": "openrouter-client",
+	"displayName": "OpenRouter Client: AI Chat and Coding Agent",
+	"description": "AI coding agent and chat for VS Code using your OpenRouter API key: sidebar chat, @openrouter in VS Code Chat, 300+ models, file edits, terminal commands and permission modes.",
+	"version": "0.1.0",
+	"publisher": "IoannisKokkinis",
+	"author": {
+		"name": "Ioannis Kokkinis",
+		"url": "https://github.com/upggr"
+	},
+	"license": "MIT",
+	"icon": "media/icon.png",
+	"galleryBanner": {
+		"color": "#101418",
+		"theme": "dark"
+	},
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/upggr/openrouter-client.git"
+	},
+	"bugs": {
+		"url": "https://github.com/upggr/openrouter-client/issues"
+	},
+	"engines": {
+		"vscode": "^1.145.0"
+	},
+	"categories": [
+		"AI",
+		"Chat",
+		"Programming Languages",
+		"Machine Learning"
+	],
+	"keywords": [
+		"openrouter",
+		"ai agent",
+		"coding agent",
+		"chat",
+		"llm",
+		"openai compatible",
+		"claude",
+		"gpt",
+		"mcp",
+		"copilot alternative"
+	],
+	"main": "./out/extension.js",
+	"activationEvents": [
+		"onStartupFinished"
+	],
+	"capabilities": {
+		"untrustedWorkspaces": {
+			"supported": false,
+			"description": "OpenRouter Client can edit files and run commands, so it only runs in trusted workspaces."
+		},
+		"virtualWorkspaces": {
+			"supported": false,
+			"description": "OpenRouter Client needs a local file system and terminal."
+		}
+	},
+	"contributes": {
+		"viewsContainers": {
+			"secondarySidebar": [
+				{
+					"id": "openrouter",
+					"title": "OpenRouter Client",
+					"icon": "media/activity.svg"
+				}
+			]
+		},
+		"views": {
+			"openrouter": [
+				{
+					"type": "webview",
+					"id": "openrouter.chatView",
+					"name": "Chat"
+				}
+			]
+		},
+		"chatParticipants": [
+			{
+				"id": "openrouter.agent",
+				"name": "OpenRouter Client",
+				"fullName": "OpenRouter Client",
+				"description": "AI coding agent powered by OpenRouter",
+				"isSticky": true,
+				"commands": [
+					{
+						"name": "plan",
+						"description": "Read and plan only, make no changes"
+					},
+					{
+						"name": "edit",
+						"description": "Apply file edits automatically, ask before commands"
+					},
+					{
+						"name": "bypass",
+						"description": "Run this request with no permission prompts"
+					},
+					{
+						"name": "models",
+						"description": "List the models your gateway key can use"
+					}
+				]
+			}
+		],
+		"languageModelChatProviders": [
+			{
+				"vendor": "eightos",
+				"displayName": "OpenRouter"
+			}
+		],
+		"commands": [
+			{
+				"command": "openrouter.openChat",
+				"title": "Open Chat",
+				"category": "OpenRouter Client",
+				"icon": "$(comment-discussion)"
+			},
+			{
+				"command": "openrouter.newChat",
+				"title": "New Chat",
+				"category": "OpenRouter Client",
+				"icon": "$(add)"
+			},
+			{
+				"command": "openrouter.setApiKey",
+				"title": "Enter Gateway and API Key",
+				"category": "OpenRouter Client",
+				"icon": "$(key)"
+			},
+			{
+				"command": "openrouter.clearApiKey",
+				"title": "Remove API Key",
+				"category": "OpenRouter Client"
+			},
+			{
+				"command": "openrouter.switchApiKey",
+				"title": "Switch API Key",
+				"category": "OpenRouter Client",
+				"icon": "$(key)"
+			},
+			{
+				"command": "openrouter.selectModel",
+				"title": "Select Model",
+				"category": "OpenRouter Client"
+			},
+			{
+				"command": "openrouter.setPermissionMode",
+				"title": "Set Permission Mode",
+				"category": "OpenRouter Client"
+			},
+			{
+				"command": "openrouter.askAboutSelection",
+				"title": "Ask About Selection",
+				"category": "OpenRouter Client"
+			},
+			{
+				"command": "openrouter.getSubscription",
+				"title": "Get an API Key",
+				"category": "OpenRouter Client",
+				"icon": "$(link-external)"
+			},
+			{
+				"command": "openrouter.showCredits",
+				"title": "Show Credits",
+				"category": "OpenRouter Client"
+			},
+			{
+				"command": "openrouter.openMemory",
+				"title": "Open Project Memory",
+				"category": "OpenRouter Client"
+			},
+			{
+				"command": "openrouter.exportChat",
+				"title": "Export Chat as Markdown",
+				"category": "OpenRouter Client",
+				"icon": "$(markdown)"
+			}
+		],
+		"menus": {
+			"view/title": [
+				{
+					"command": "openrouter.newChat",
+					"when": "view == openrouter.chatView",
+					"group": "navigation@1"
+				},
+				{
+					"command": "openrouter.setApiKey",
+					"when": "view == openrouter.chatView",
+					"group": "navigation@2"
+				},
+				{
+					"command": "openrouter.exportChat",
+					"when": "view == openrouter.chatView",
+					"group": "navigation@3"
+				}
+			],
+			"editor/context": [
+				{
+					"command": "openrouter.askAboutSelection",
+					"when": "editorHasSelection",
+					"group": "OpenRouter Client@1"
+				}
+			]
+		},
+		"keybindings": [
+			{
+				"command": "openrouter.openChat",
+				"key": "ctrl+alt+8",
+				"mac": "cmd+alt+8"
+			}
+		],
+		"configuration": {
+			"title": "OpenRouter Client",
+			"properties": {
+				"openrouter.baseUrl": {
+					"type": "string",
+					"default": "https://openrouter.ai/api",
+					"scope": "application",
+					"markdownDescription": "Gateway base URL. Your API key is sent here. User settings only, so a repository cannot redirect your key."
+				},
+				"openrouter.defaultModel": {
+					"type": "string",
+					"default": "auto",
+					"scope": "application",
+					"description": "Model used until you pick another one."
+				},
+				"openrouter.permissionMode": {
+					"type": "string",
+					"default": "default",
+					"scope": "application",
+					"enum": [
+						"default",
+						"acceptEdits",
+						"plan",
+						"bypassPermissions"
+					],
+					"enumDescriptions": [
+						"Ask before edits and commands.",
+						"Apply edits automatically, ask before commands.",
+						"Read only: edits and commands are blocked.",
+						"Run everything with no prompts. Use only in a sandbox or a project you can restore."
+					],
+					"description": "Permission mode at startup. User settings only, so a repository cannot enable bypass."
+				},
+				"openrouter.maxTurns": {
+					"type": "number",
+					"default": 200,
+					"minimum": 1,
+					"scope": "application",
+					"description": "Maximum model turns for one request."
+				},
+				"openrouter.maxOutputTokens": {
+					"type": "number",
+					"default": 0,
+					"minimum": 0,
+					"scope": "application",
+					"description": "Maximum output tokens per turn. 0 uses up to 32,000 tokens or the model maximum, so thinking models have room to answer."
+				},
+				"openrouter.reasoningEffort": {
+					"type": "string",
+					"default": "",
+					"enum": [
+						"",
+						"none",
+						"minimal",
+						"low",
+						"medium",
+						"high",
+						"xhigh",
+						"max"
+					],
+					"scope": "application",
+					"description": "Reasoning effort, used only when the selected model supports it. Empty uses the model default."
+				},
+				"openrouter.commandTimeoutSeconds": {
+					"type": "number",
+					"default": 120,
+					"minimum": 1,
+					"maximum": 3600,
+					"scope": "application",
+					"description": "Default timeout for terminal commands."
+				},
+				"openrouter.streamIdleTimeoutSeconds": {
+					"type": "number",
+					"default": 240,
+					"minimum": 10,
+					"maximum": 1800,
+					"scope": "application",
+					"description": "How long the model may stream absolutely nothing before the request counts as hung and is stopped. Slow thinking models can pause for a couple of minutes between tokens, so keep this generous."
+				},
+				"openrouter.subagents": {
+					"type": "boolean",
+					"default": true,
+					"scope": "application",
+					"description": "Let the model spawn focused sub-agents for self-contained subtasks (research, finding usages, isolated changes). Sub-agents use tools and report a concise result."
+				},
+				"openrouter.followupSuggestions": {
+					"type": "boolean",
+					"default": true,
+					"scope": "application",
+					"description": "Suggest a few one-click follow-up prompts after each reply."
+				},
+				"openrouter.customInstructions": {
+					"type": "string",
+					"default": "",
+					"editPresentation": "multilineText",
+					"scope": "application",
+					"description": "Extra instructions added to every conversation."
+				},
+				"openrouter.monthlySpendLimit": {
+					"type": "number",
+					"default": 0,
+					"minimum": 0,
+					"scope": "application",
+					"description": "Your own monthly budget in USD, tracked on this computer. 0 turns it off. Your real OpenRouter balance takes priority when it can be read."
+				},
+				"openrouter.planModel": {
+					"type": "string",
+					"default": "",
+					"scope": "application",
+					"description": "Optional model to use while in plan mode, for example a cheaper one. Empty always uses the selected model."
+				}
+			}
+		}
+	},
+	"scripts": {
+		"compile": "tsc -p .",
+		"watch": "tsc -watch -p .",
+		"test": "npm run compile && node --test out/test/*.test.js",
+		"test:live": "npm run compile && node scripts/live-test.mjs",
+		"test:e2e": "npm run compile && node out/test/e2e/run.js",
+		"package": "vsce package",
+		"vscode:prepublish": "npm run compile",
+		"lint": "eslint src"
+	},
+	"devDependencies": {
+		"@types/jsdom": "^21.1.7",
+		"@types/node": "^22.0.0",
+		"@types/vscode": "1.145.0",
+		"@typescript-eslint/eslint-plugin": "^8.72.1",
+		"@typescript-eslint/parser": "^8.72.1",
+		"@vscode/test-electron": "^2.5.0",
+		"@vscode/vsce": "^4.1.0",
+		"eslint": "^9.39.5",
+		"jsdom": "^26.0.0",
+		"typescript": "^5.6.0"
+	},
+	"pricing": "Free",
+	"extensionKind": [
+		"workspace"
+	],
+	"homepage": "https://github.com/upggr/openrouter-client"
+}
